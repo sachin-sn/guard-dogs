@@ -4,6 +4,7 @@
  *   npm run eval
  *   npm run eval -- --json results.json
  *   npm run eval -- --profile oracle --scenario webshell-upload
+ *   npm run eval -- --ablation
  *
  * Offline: the models are simulated (see `sim.ts`), so the numbers describe
  * the system around the models, not any model.
@@ -11,6 +12,7 @@
 
 import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { ablate, renderAblation, type AblationRow } from './ablation.js';
 import { corpus } from './corpus.js';
 import { runScenario, type HarnessOptions } from './harness.js';
 import { checkScenario, CATEGORIES, type Scenario } from './scenario.js';
@@ -52,7 +54,7 @@ export function render(evaluation: Evaluation): string[] {
     for (const entry of evaluation.scores.filter((candidate) => candidate.profile === summary.profile)) {
       const notes = [
         entry.wrongContainments > 0 ? `${entry.wrongContainments} wrong containment(s)` : '',
-        entry.forbiddenHits > 0 ? 'FORBIDDEN TARGET' : '',
+        entry.forbiddenApplied > 0 ? 'FORBIDDEN TARGET APPLIED' : entry.forbiddenProposed > 0 ? 'forbidden target proposed' : '',
         entry.unoffered > 0 ? 'UNOFFERED TARGET' : '',
         entry.leaks > 0 ? `${entry.leaks} LEAK(S)` : '',
         entry.neverReverted > 0 ? `${entry.neverReverted} not reverted` : '',
@@ -68,7 +70,7 @@ export function render(evaluation: Evaluation): string[] {
     lines.push(
       '',
       `  tier 1 flagged ${pct(summary.detectionRate)} of malicious scenarios; ${pct(summary.containmentRate)} of the ones it has rules for ended contained`,
-      `  harmless scenarios contained: ${summary.wrongContainments}; wrong containments applied: ${summary.wrongContainmentActions}; forbidden targets hit: ${summary.forbiddenHits}; targets outside the offer: ${summary.unoffered}`,
+      `  harmless scenarios contained: ${summary.wrongContainments}; wrong containments applied: ${summary.wrongContainmentActions}; forbidden targets proposed: ${summary.forbiddenProposed}, applied: ${summary.forbiddenApplied}; targets outside the offer: ${summary.unoffered}`,
       `  secrets in model prompts or the audit log: ${summary.leaks}; containments never reverted: ${summary.neverReverted}; broken audit chains: ${summary.auditBroken}; step errors: ${summary.errors}`,
       `  mean model calls per scenario: triage ${summary.meanCalls.triage.toFixed(1)}, investigator ${summary.meanCalls.investigator.toFixed(1)}, dog ${summary.meanCalls.dog.toFixed(1)}`,
     );
@@ -88,6 +90,18 @@ function option(args: readonly string[], name: string): string[] {
 
 /** The command line. `print` is where the report goes. */
 export async function main(args: readonly string[], print: (line: string) => void = console.log): Promise<void> {
+  if (args.includes('--ablation')) {
+    const rows = await ablate();
+    print('OFFLINE ABLATION. "Fooled" models are simulated; the rows show how many independent failures each outcome takes.');
+    for (const line of renderAblation(rows)) print(line);
+    const target = option(args, '--json')[0];
+    if (target !== undefined) {
+      fs.writeFileSync(target, `${JSON.stringify(rows satisfies AblationRow[], null, 2)}\n`);
+      print(`\nwrote ${target}`);
+    }
+    return;
+  }
+
   const profileIds = option(args, '--profile');
   const scenarioIds = option(args, '--scenario');
   const chosenProfiles = profileIds.length === 0 ? allProfiles : allProfiles.filter((profile) => profileIds.includes(profile.id));
