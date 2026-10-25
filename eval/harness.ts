@@ -116,14 +116,26 @@ export interface HarnessOptions {
   investigators?: number;
   /** Whether tier 2 triage runs. Default true. */
   triage?: boolean;
+  /** Models asked by triage, 1 to 3. Any one of them can escalate. Default 1. */
+  triageModels?: number;
+  /**
+   * The family of each of the four models, in order. Default: four families.
+   * Models of one family share blind spots, which is what the same-family
+   * comparison needs.
+   */
+  families?: readonly [string, string, string, string];
+  /**
+   * How the panel is made. `planned` (default) uses the planner, which puts one
+   * model of each family on the panel and refuses to make a panel of one
+   * family. `in-order` seats the models in order whatever their families,
+   * which is how a panel built by hand goes wrong.
+   */
+  panel?: 'planned' | 'in-order';
 }
 
-const MODELS = [
-  { id: 'model-a', provider: 'provider-a', family: 'family-a' },
-  { id: 'model-b', provider: 'provider-b', family: 'family-b' },
-  { id: 'model-c', provider: 'provider-c', family: 'family-c' },
-  { id: 'model-d', provider: 'provider-d', family: 'family-d' },
-] as const;
+const MODEL_IDS = ['model-a', 'model-b', 'model-c', 'model-d'] as const;
+const DEFAULT_FAMILIES = ['family-a', 'family-b', 'family-c', 'family-d'] as const;
+const VIEWS = ['raw-logs', 'summaries', 'timeline'] as const;
 
 const CONTAINMENT_KINDS: readonly ProposedAction['kind'][] = ['contain.rate-limit', 'contain.block-source', 'contain.quarantine-file', 'contain.isolate-service'];
 
@@ -155,11 +167,14 @@ async function run(scenario: Scenario, profile: ModelProfile, options: HarnessOp
   const targets: CaseTarget[] = scenario.targets.map((entry) => ({ target: resolve(entry.target), kinds: entry.kinds }));
   const truth = truthOf(scenario, correct);
 
+  const families = options.families ?? DEFAULT_FAMILIES;
   const registry = createModelRegistry(
-    MODELS.map((model) => ({
-      ...model,
+    MODEL_IDS.map((id, index) => ({
+      id,
+      provider: `provider-${id.slice(-1)}`,
+      family: families[index] as string,
       tier: 'large' as const,
-      endpoint: `https://${model.id}.llm.example.invalid/v1/chat`,
+      endpoint: `https://${id}.llm.example.invalid/v1/chat`,
       handling: 'zero-retention' as const,
       maxInputChars: 24_000,
     })),
@@ -173,7 +188,7 @@ async function run(scenario: Scenario, profile: ModelProfile, options: HarnessOp
       const record: Call = { role, actor, model: modelId, request, reply: '', failed: false };
       calls.push(record);
       try {
-        record.reply = await profile.reply(role, request, { actor, model: modelId }, truth);
+        record.reply = await profile.reply(role, request, { actor, model: modelId, family: registry.require(modelId).family }, truth);
         return record.reply;
       } catch (error) {
         record.failed = true;
@@ -182,7 +197,11 @@ async function run(scenario: Scenario, profile: ModelProfile, options: HarnessOp
     },
   });
 
-  const members = planPanel(registry, { size: options.panelSize ?? 3, views: ['raw-logs', 'summaries', 'timeline'] });
+  const size = options.panelSize ?? 3;
+  const members =
+    options.panel === 'in-order'
+      ? Array.from({ length: size }, (_, seat) => ({ id: `dog-${seat + 1}`, model: MODEL_IDS[seat % MODEL_IDS.length] as string, evidenceView: VIEWS[seat % VIEWS.length] as string }))
+      : planPanel(registry, { size, views: [...VIEWS] });
   const policy = createGatePolicy({
     panel: members,
     preApproved: PRE_APPROVED,
@@ -247,10 +266,12 @@ async function run(scenario: Scenario, profile: ModelProfile, options: HarnessOp
 
   const dogs = members.map((member) => new ModelDog({ id: member.id, evidenceView: member.evidenceView, client: client('dog', member.id, member.model) }));
   const investigatorCount = options.investigators ?? 2;
-  const investigators = MODELS.slice(0, investigatorCount).map(
-    (model, index) => new Investigator({ id: `investigator-${index + 1}`, client: client('investigator', `investigator-${index + 1}`, model.id), maxTtlSeconds: 1800, log, clock }),
+  const investigators = MODEL_IDS.slice(0, investigatorCount).map(
+    (modelId, index) => new Investigator({ id: `investigator-${index + 1}`, client: client('investigator', `investigator-${index + 1}`, modelId), maxTtlSeconds: 1800, log, clock }),
   );
-  const triage = options.triage === false ? undefined : new TriageDog({ clients: [client('triage', 'triage', 'model-d')], log });
+  // Triage uses the models from the other end, so it shares the fewest with the investigators.
+  const triageIds = [...MODEL_IDS].reverse().slice(0, options.triageModels ?? 1);
+  const triage = options.triage === false ? undefined : new TriageDog({ clients: triageIds.map((modelId) => client('triage', `triage-${modelId}`, modelId)), log });
 
   const orchestrator = new Orchestrator({
     pipeline: recording,

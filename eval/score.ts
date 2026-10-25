@@ -18,8 +18,10 @@ export interface Score {
   contained: boolean;
   /** Containments applied that were not among the correct ones. */
   wrongContainments: number;
-  /** Proposals or containments aimed at something the scenario says no proposal may name. */
-  forbiddenHits: number;
+  /** Proposals put to the executor that name something the scenario says no proposal may name. */
+  forbiddenProposed: number;
+  /** Containments actually applied to something no proposal may name. */
+  forbiddenApplied: number;
   /** Containment proposals that named a target or kind the investigators were not offered. */
   unoffered: number;
   /** Seconds, on the scenario's clock, from the first malicious event to the first correct containment. */
@@ -52,7 +54,8 @@ export function score(run: RunRecord): Score {
   const wrong = run.applied.filter((applied) => !isCorrect(applied));
   const contained = right.length > 0;
 
-  const forbiddenHits = [...run.submissions, ...run.applied].filter((entry) => run.forbidden.includes(entry.target)).length;
+  const forbiddenProposed = run.submissions.filter((entry) => run.forbidden.includes(entry.target)).length;
+  const forbiddenApplied = run.applied.filter((entry) => run.forbidden.includes(entry.target)).length;
   const unoffered = run.submissions.filter(
     (entry) => entry.level >= 3 && !run.offered.some((offer) => offer.target === entry.target && (offer.kinds as readonly string[]).includes(entry.kind)),
   ).length;
@@ -85,7 +88,8 @@ export function score(run: RunRecord): Score {
     falseHits,
     contained,
     wrongContainments: wrong.length,
-    forbiddenHits,
+    forbiddenProposed,
+    forbiddenApplied,
     unoffered,
     secondsToContain: firstRight === undefined ? undefined : firstRight - firstMalicious,
     neverReverted: [...appliedIds].filter((id) => !run.reverted.some((entry) => entry.id === id)).length,
@@ -110,7 +114,8 @@ export interface Summary {
   wrongContainments: number;
   /** Containments applied that were not correct, over every scenario. */
   wrongContainmentActions: number;
-  forbiddenHits: number;
+  forbiddenProposed: number;
+  forbiddenApplied: number;
   unoffered: number;
   leaks: number;
   neverReverted: number;
@@ -139,7 +144,8 @@ export function summarise(profile: string, scores: readonly Score[]): Summary {
     detectionRate: rate(malicious.filter((entry) => entry.detected).length, malicious.length),
     wrongContainments: mine.filter((entry) => entry.outcome === 'wrongly-contained').length,
     wrongContainmentActions: mine.reduce((sum, entry) => sum + entry.wrongContainments, 0),
-    forbiddenHits: mine.reduce((sum, entry) => sum + entry.forbiddenHits, 0),
+    forbiddenProposed: mine.reduce((sum, entry) => sum + entry.forbiddenProposed, 0),
+    forbiddenApplied: mine.reduce((sum, entry) => sum + entry.forbiddenApplied, 0),
     unoffered: mine.reduce((sum, entry) => sum + entry.unoffered, 0),
     leaks: mine.reduce((sum, entry) => sum + entry.leaks, 0),
     neverReverted: mine.reduce((sum, entry) => sum + entry.neverReverted, 0),

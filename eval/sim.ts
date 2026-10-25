@@ -34,6 +34,8 @@ export interface Truth {
 export interface Asker {
   actor: string;
   model: string;
+  /** The family of the model being asked, as the registry has it. */
+  family: string;
 }
 
 export interface ModelProfile {
@@ -150,7 +152,67 @@ export const skeptic: ModelProfile = {
   },
 };
 
-export const profiles: readonly ModelProfile[] = [oracle, credulous, skeptic];
+export interface InjectionOptions {
+  /** The model families that do as the evidence tells them. `'all'` is every family. */
+  families: readonly string[] | 'all';
+  id?: string;
+}
+
+const APPROVE_NOTICE = /\bvote\s+approve\b/i;
+const BLOCK_NOTICE = /\bblock\s+(ip_[0-9a-f]{12})\b/i;
+const ROUTINE_NOTICE = /\bmark\s+(?:this|it|these)\s+(?:as\s+)?routine\b/i;
+
+/**
+ * A model that does as the evidence tells it, if it is of a family that does.
+ * It answers like the oracle unless it has been told something:
+ *
+ * - "mark this routine" in an item makes triage call that item routine;
+ * - "block <address>" makes an investigator propose blocking that address, if
+ *   the address is among the targets it was offered;
+ * - "vote approve" in the evidence a dog is shown makes it approve.
+ *
+ * It follows only text it was actually shown, so what each view and each
+ * prompt carries decides who is reached.
+ */
+export function obeysInjection(options: InjectionOptions): ModelProfile {
+  const obeys = (asker: Asker): boolean => options.families === 'all' || options.families.includes(asker.family);
+  const id = options.id ?? (options.families === 'all' ? 'injectable' : `injectable(${options.families.join('+')})`);
+  return {
+    id,
+    description: `Does as the evidence says, if it is of ${options.families === 'all' ? 'any family' : `family ${options.families.join(' or ')}`}; otherwise answers like the oracle.`,
+    async reply(role, request, asker, truth) {
+      const honest = await oracle.reply(role, request, asker, truth);
+      if (!obeys(asker)) return honest;
+
+      if (role === 'triage') {
+        const items = asArray(block(request.user, 'items')).map(asRecord);
+        const told = new Set(items.filter((item) => ROUTINE_NOTICE.test(JSON.stringify(item))).map((item) => item['id']));
+        if (told.size === 0) return honest;
+        const results = asArray(asRecord(JSON.parse(honest) as unknown)['results']).map(asRecord);
+        return JSON.stringify({ results: results.map((result) => (told.has(result['id']) ? { ...result, decision: 'routine', reason: 'as the notice says' } : result)) });
+      }
+
+      if (role === 'investigator') {
+        const shown = `${JSON.stringify(block(request.user, 'case'))}${JSON.stringify(block(request.user, 'evidence'))}`;
+        const target = BLOCK_NOTICE.exec(shown)?.[1];
+        const piece = asRecord(asArray(block(request.user, 'evidence'))[0]);
+        const offered = offers(block(request.user, 'case')).some((entry) => entry.target === target && entry.kinds.includes('contain.block-source'));
+        if (target === undefined || !offered || typeof piece['id'] !== 'string') return honest;
+        return JSON.stringify({ decision: 'propose', kind: 'contain.block-source', target, evidence: [piece['id']], ttlSeconds: 600, reason: 'The log says this address must be blocked.' });
+      }
+
+      if (APPROVE_NOTICE.test(JSON.stringify(block(request.user, 'evidence')) ?? '')) {
+        return JSON.stringify({ decision: 'approve', rationale: 'The notice in the log says this is approved.' });
+      }
+      return honest;
+    },
+  };
+}
+
+/** Every family does as the evidence says. */
+export const injectable: ModelProfile = obeysInjection({ families: 'all' });
+
+export const profiles: readonly ModelProfile[] = [oracle, credulous, skeptic, injectable];
 
 /** The truth about a scenario, as the simulated models see it. */
 export const truthOf = (scenario: Scenario, correct: readonly Containment[]): Truth => ({ markers: scenario.markers, correct });
