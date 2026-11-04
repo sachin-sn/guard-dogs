@@ -89,7 +89,7 @@ export function planPanel(registry: ModelRegistry, options: PlanOptions): PanelM
     seatsByProvider.set(model.provider, (seatsByProvider.get(model.provider) ?? 0) + 1);
     seatsByFamily.set(model.family, (seatsByFamily.get(model.family) ?? 0) + 1);
     modelOfFamily.set(model.family, model.id);
-    members.push({ id: `${prefix}-${seat + 1}`, model: model.id, evidenceView: view });
+    members.push({ id: `${prefix}-${seat + 1}`, model: model.id, family: model.family, evidenceView: view });
   }
 
   if (new Set(members.map((member) => member.model)).size < 2) {

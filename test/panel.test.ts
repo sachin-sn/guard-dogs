@@ -513,18 +513,27 @@ describe('Panel early decision never changes the verdict', () => {
     return [forward, [...forward].reverse(), middleOut];
   };
 
-  const setups: { name: string; models: string[]; options: { requireDistinctModels?: boolean; rule?: 'majority' | 'unanimous' } }[] = [
+  const setups: {
+    name: string;
+    models: string[];
+    options: { requireDistinctModels?: boolean; rule?: 'majority' | 'unanimous'; minOutsideFamily?: number };
+    /** The smallest panel the options are valid for. */
+    from?: number;
+  }[] = [
     { name: 'two models, distinct required', models: ['model-x', 'model-y'], options: {} },
     { name: 'one model, distinct required', models: ['model-x'], options: {} },
     { name: 'three models, distinct not required', models: ['model-x', 'model-y', 'model-z'], options: { requireDistinctModels: false } },
     { name: 'two models, unanimous', models: ['model-x', 'model-y'], options: { rule: 'unanimous' } },
+    { name: 'two families, one approval from outside the larger', models: ['model-x', 'model-y'], options: { minOutsideFamily: 1 } },
+    { name: 'three families, two approvals from outside the largest', models: ['model-x', 'model-y', 'model-z'], options: { minOutsideFamily: 2 }, from: 3 },
+    { name: 'two families, two from outside, distinct models not required', models: ['model-x', 'model-y'], options: { minOutsideFamily: 2, requireDistinctModels: false }, from: 3 },
   ];
 
   for (const setup of setups) {
     it(`holds for panels of 2 to 6 dogs (${setup.name})`, async () => {
       let earlyCases = 0;
       let cases = 0;
-      for (let n = 2; n <= 6; n++) {
+      for (let n = setup.from ?? 2; n <= 6; n++) {
         for (const combo of combinations(n)) {
           for (const order of orders(n)) {
             const list = dogs(n, setup.models);

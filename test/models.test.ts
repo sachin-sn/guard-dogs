@@ -137,14 +137,19 @@ describe('planPanel', () => {
 
   it('spreads seats over providers first, then over families', () => {
     expect(planPanel(big, { size: 3, views })).toEqual([
-      { id: 'dog-1', model: 'a-1', evidenceView: 'raw-logs' },
-      { id: 'dog-2', model: 'b-1', evidenceView: 'summaries' },
-      { id: 'dog-3', model: 'c-1', evidenceView: 'timeline' },
+      { id: 'dog-1', model: 'a-1', family: 'alpha-1', evidenceView: 'raw-logs' },
+      { id: 'dog-2', model: 'b-1', family: 'beta-1', evidenceView: 'summaries' },
+      { id: 'dog-3', model: 'c-1', family: 'gamma-1', evidenceView: 'timeline' },
     ]);
     // A fourth seat goes to the provider with the most families to offer, and a second family of it.
     expect(planPanel(big, { size: 4, views }).map((m) => m.model)).toEqual(['a-1', 'b-1', 'c-1', 'a-2']);
     // Past that, seats repeat models already chosen rather than adding a second model of a family.
     expect(planPanel(big, { size: 7, views }).map((m) => m.model)).toEqual(['a-1', 'b-1', 'c-1', 'a-2', 'b-1', 'c-1', 'a-1']);
+  });
+
+  it('puts each model\'s family on the seat, so the gate can count approvals by family', () => {
+    for (const member of planPanel(big, { size: 7, views })) expect(member.family).toBe(big.require(member.model).family);
+    expect(planPanel(big, { size: 3, views, tier: 'small' }).map((m) => m.family)).toEqual(['alpha-s', 'beta-s', 'alpha-s']);
   });
 
   it('is deterministic', () => {

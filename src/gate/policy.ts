@@ -36,6 +36,12 @@ export interface PanelMember {
   id: string;
   /** The model behind this guard dog. Panels should not all share one. */
   model: string;
+  /**
+   * The model lineage, such as one vendor's model line. Models of one family
+   * share blind spots. Used only by `minOutsideFamily`; when absent, the
+   * model counts as its own family.
+   */
+  family?: string;
   /** Which slice of the evidence this guard dog sees (for example "raw-logs" or "summaries"). */
   evidenceView: string;
 }
@@ -65,6 +71,15 @@ export interface GatePolicyInput {
   dissentAlertMin?: number;
   /** Require the approving members to span at least two models. Default true. */
   requireDistinctModels?: boolean;
+  /**
+   * Of the approvals that make a majority, at least this many must come from
+   * outside the family with the most approvals. Default 0, which leaves the
+   * rule as it was. `requireDistinctModels` is satisfied by one approving dog
+   * of another model, so a family that is fooled as a whole needs only one
+   * accomplice; this makes it need more. It costs availability: a real attack
+   * that the other families miss waits for a person. See docs/evaluation.md.
+   */
+  minOutsideFamily?: number;
   /** Level 3 actions that may run automatically, per kind. Anything else waits for a human. */
   preApproved?: Partial<Record<ActionKind, PreApproval>>;
   /**
@@ -83,6 +98,7 @@ export interface GatePolicy {
   readonly rule: 'unanimous' | 'majority';
   readonly dissentAlertMin: number;
   readonly requireDistinctModels: boolean;
+  readonly minOutsideFamily: number;
   readonly preApproved: Readonly<Partial<Record<ActionKind, PreApproval>>>;
   readonly protectedTargets: readonly string[];
   readonly approvers: ReadonlySet<string>;
@@ -106,6 +122,9 @@ export function createGatePolicy(input: GatePolicyInput): GatePolicy {
     if (member.id.length === 0 || member.model.length === 0 || member.evidenceView.length === 0) {
       throw new RangeError('panel members need an id, a model and an evidence view');
     }
+    if (member.family !== undefined && (typeof member.family !== 'string' || member.family.length === 0)) {
+      throw new RangeError(`${member.id}: a family, when given, must be a non-empty name`);
+    }
     if (panel.has(member.id)) throw new RangeError(`duplicate panel member "${member.id}"`);
     panel.set(member.id, { ...member });
   }
@@ -119,6 +138,11 @@ export function createGatePolicy(input: GatePolicyInput): GatePolicy {
   const dissentAlertMin = input.dissentAlertMin ?? Math.max(2, Math.ceil(panel.size / 3));
   if (!Number.isInteger(dissentAlertMin) || dissentAlertMin < 1 || dissentAlertMin > panel.size) {
     throw new RangeError('dissentAlertMin must be a whole number from 1 to the size of the panel');
+  }
+
+  const minOutsideFamily = input.minOutsideFamily ?? 0;
+  if (!Number.isInteger(minOutsideFamily) || minOutsideFamily < 0 || minOutsideFamily >= panel.size) {
+    throw new RangeError('minOutsideFamily must be a whole number from 0 to one less than the size of the panel');
   }
 
   const preApproved: Partial<Record<ActionKind, PreApproval>> = {};
@@ -150,6 +174,7 @@ export function createGatePolicy(input: GatePolicyInput): GatePolicy {
     rule,
     dissentAlertMin,
     requireDistinctModels: input.requireDistinctModels ?? true,
+    minOutsideFamily,
     preApproved,
     protectedTargets,
     approvers: new Set(input.approvers ?? []),

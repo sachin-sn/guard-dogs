@@ -45,14 +45,23 @@ function expectedCell(seats: readonly Seat[], votes: readonly ('approve' | 'reje
   const rejecting = votes.filter((vote) => vote === 'reject').length;
   if (approving.length >= required) {
     const diverse = new Set(approving.map((seat) => seat.model)).size >= 2;
-    if ((options.requireDistinctModels ?? true) && !diverse) return { outcome: 'await-human', flagged: false, split: false, notDiverse: true };
-    return { outcome: 'execute', flagged: false, split: false, notDiverse: false };
+    if ((options.requireDistinctModels ?? true) && !diverse) {
+      return { outcome: 'await-human', flagged: false, split: false, notDiverse: true, oneSided: false };
+    }
+    const perFamily = new Map<string, number>();
+    for (const seat of approving) perFamily.set(seat.family, (perFamily.get(seat.family) ?? 0) + 1);
+    const outside = approving.length - Math.max(...perFamily.values());
+    if (outside < (options.minOutsideFamily ?? 0)) {
+      return { outcome: 'await-human', flagged: false, split: false, notDiverse: false, oneSided: true };
+    }
+    return { outcome: 'execute', flagged: false, split: false, notDiverse: false, oneSided: false };
   }
   return {
     outcome: rejecting >= required ? 'deny' : 'await-human',
     flagged: approving.length >= alertAt,
     split: rejecting < required,
     notDiverse: false,
+    oneSided: false,
   };
 }
 
@@ -107,6 +116,9 @@ describe('gateTable', () => {
       { requireDistinctModels: false },
       { dissentAlertMin: 1 },
       { dissentAlertMin: 2, rule: 'majority', requireDistinctModels: true },
+      { minOutsideFamily: 1 },
+      { minOutsideFamily: 2 },
+      { minOutsideFamily: 2, requireDistinctModels: false, rule: 'unanimous' },
     ];
     // Panels that are not the same read from either end, so a table indexed the wrong way round shows.
     const uneven: [string, Seat[]][] = [
@@ -120,6 +132,8 @@ describe('gateTable', () => {
     ];
     for (const options of optionSets) {
       for (const [name, seats] of arrangements) {
+        // The gate refuses a rule that asks for as many outside approvals as the panel has seats.
+        if ((options.minOutsideFamily ?? 0) >= seats.length) continue;
         const table = gateTable(seats, options);
         for (let index = 0; index < 3 ** seats.length; index++) {
           const votes: ('approve' | 'reject' | 'abstain')[] = [];
@@ -150,6 +164,16 @@ describe('gateTable', () => {
     }
     // And not when the probe leaves the vote as the only reason.
     expect(gateTable(seats, {}, { reason: 'Another sentence.' })[0]?.outcome).toBe('execute');
+  });
+
+  it('keeps the table of a rule on families apart from the plain one, and tells families apart', () => {
+    const seats = [seat('x', 'm1'), seat('x', 'm2'), seat('y', 'm3')];
+    // Seats 0 and 1 approve and seat 2 rejects: index 0 + 0 + 9.
+    expect(gateTable(seats)[9]?.outcome).toBe('execute');
+    expect(gateTable(seats, { minOutsideFamily: 1 })[9]).toMatchObject({ outcome: 'await-human', oneSided: true, notDiverse: false });
+    // The same models in other families give another table.
+    const apart = [seat('x', 'm1'), seat('y', 'm2'), seat('z', 'm3')];
+    expect(gateTable(apart, { minOutsideFamily: 1 })[9]?.outcome).toBe('execute');
   });
 
   it('keeps a probed table apart from the plain one', () => {
@@ -288,6 +312,76 @@ describe('panelRisk, by hand', () => {
     close(reversed.bad.execute, bad.execute);
     close(reversed.bad.notDiverse, bad.notDiverse);
     close(reversed.good.execute, good.execute);
+  });
+
+  it('with a rule on outside approvals: four dogs of two families need all four to agree', () => {
+    const e = 0.2;
+    const { bad, good } = panelRisk(seatsFor('two-families', 4), { error: e }, { minOutsideFamily: 2 });
+    // Three approvals are two of one family and one of the other: one outside. Only all four give two.
+    close(bad.execute, e ** 4);
+    close(bad.oneSided, 4 * e ** 3 * (1 - e));
+    close(good.execute, (1 - e) ** 4);
+    close(good.oneSided, 4 * (1 - e) ** 3 * e);
+    close(bad.notDiverse, 0);
+  });
+
+  it('with a rule on outside approvals, a panel of one family never acts', () => {
+    for (let size = 3; size <= MAX_PANEL_SIZE; size++) {
+      const { bad, good } = panelRisk(seatsFor('one-family', size), { error: 0.2, shared: 0.1 }, { minOutsideFamily: 1 });
+      expect(bad.execute).toBe(0);
+      expect(good.execute).toBe(0);
+      expect(bad.oneSided).toBeGreaterThan(0);
+    }
+  });
+
+  it('with a rule on outside approvals, a fooled family of five needs three accomplices on nine dogs', () => {
+    // Family A has five seats and B four. Fooled A alone is five approvals, none outside, and one model.
+    const shared = panelRisk(seatsFor('two-families', 9), { shared: 0.1 }, { minOutsideFamily: 2 });
+    close(shared.bad.execute, 0.01);
+    // With A certainly fooled and B erring at 20% on its own: B needs two or more wrong dogs of four.
+    const { bad } = panelRisk(seatsFor('two-families', 9), { error: 0.2, shared: { 'family-a': 1 } }, { minOutsideFamily: 2 });
+    close(bad.execute, 1 - 0.8 ** 4 - 4 * 0.2 * 0.8 ** 3);
+    close(bad.oneSided, 4 * 0.2 * 0.8 ** 3);
+    // Under the present rule one accomplice is enough.
+    close(panelRisk(seatsFor('two-families', 9), { error: 0.2, shared: { 'family-a': 1 } }).bad.execute, 1 - 0.8 ** 4);
+  });
+
+  it('agrees with a separate enumeration of the same panels', () => {
+    const nine = panelRisk(seatsFor('two-families', 9), { error: 0.2, shared: 0.1 }, { minOutsideFamily: 2 });
+    close(nine.bad.execute, 0.06291122176);
+    close(nine.good.execute, 0.77630275584);
+    const seven = panelRisk(seatsFor('three-families', 7), { error: 0.2, shared: 0.1, silent: 0.1 }, { minOutsideFamily: 2 });
+    close(seven.bad.execute, 0.08089384504062007);
+    close(seven.good.execute, 0.7274172687895798);
+  });
+
+  it('a stricter rule never lets more through', () => {
+    for (const failure of [{ error: 0.2 }, { error: 0.2, shared: 0.1 }, { shared: 0.3, silent: 0.1 }]) {
+      for (const mix of MIXES) {
+        for (let size = 4; size <= MAX_PANEL_SIZE; size++) {
+          let last = 2;
+          for (const outside of [0, 1, 2, 3]) {
+            const risk = panelRisk(seatsFor(mix, size), failure, { minOutsideFamily: outside });
+            expect(risk.bad.execute).toBeLessThanOrEqual(last + 1e-12);
+            expect(risk.good.execute).toBeLessThanOrEqual(1 + 1e-12);
+            last = risk.bad.execute;
+            close(total(risk.bad), 1);
+            close(total(risk.good), 1);
+          }
+        }
+      }
+    }
+  });
+
+  it('on the planner shape, one outside approval is the rule the gate already has', () => {
+    for (const mix of ['two-families', 'three-families'] as const) {
+      for (let size = 3; size <= MAX_PANEL_SIZE; size++) {
+        const plain = panelRisk(seatsFor(mix, size), { error: 0.2, shared: 0.1 });
+        const one = panelRisk(seatsFor(mix, size), { error: 0.2, shared: 0.1 }, { minOutsideFamily: 1 });
+        close(one.bad.execute, plain.bad.execute);
+        close(one.good.execute, plain.good.execute);
+      }
+    }
   });
 
   it('one model never acts alone, whatever its seats say', () => {
@@ -449,6 +543,18 @@ describe('riskTable and the report', () => {
     for (const row of rows) expect(row.risk.size).toBe(row.size);
   });
 
+  it('leaves out the sizes a rule on outside approvals cannot be met on', () => {
+    const rows = riskTable({ error: 0.2 }, { minOutsideFamily: 2 });
+    expect(rows.filter((row) => !row.complete).map((row) => `${row.mix} ${row.size}`)).toEqual([
+      'one-model 2',
+      'one-family 2',
+      'two-families 2',
+      'three-families 2',
+    ]);
+    // Worked out separately, by enumerating the same panel with the rule written out again.
+    expect(rows.find((row) => row.mix === 'two-families' && row.size === 9)?.risk.bad.execute).toBeCloseTo(0.016042496, 8);
+  });
+
   it('can be limited to some make-ups', () => {
     const rows = riskTable({ error: 0.2 }, {}, ['two-families']);
     expect(new Set(rows.map((row) => row.mix))).toEqual(new Set<Mix>(['two-families']));
@@ -507,8 +613,19 @@ describe('riskTable and the report', () => {
   it('explains the make-ups at the end', () => {
     const lines = renderRisk(FAILURES.slice(0, 1));
     expect(lines.at(-2)).toBe('  one-model: every seat the same model. one-family: a different model on each seat, all one family.');
-    expect(lines.at(-1)).toBe('  two-families, three-families: one model per family, seats handed out in turn, as planPanel does. "-": fewer seats than families.');
+    expect(lines.at(-1)).toBe('  two-families, three-families: one model per family, seats handed out in turn, as planPanel does. "-": fewer seats than the make-up or the rule needs.');
     expect(lines.at(-3)).toBe('');
+  });
+
+  it('says in the heading when the gate is asked for outside approvals, and shows its effect', () => {
+    const plain = renderRisk(FAILURES.slice(0, 1)).filter((line) => line.startsWith('== '));
+    expect(plain[0]).not.toContain('outside');
+    const lines = renderRisk([{ id: 'x', description: 'd', failure: { error: 0.2, shared: 0.1 } }], { minOutsideFamily: 2 });
+    expect(lines.filter((line) => line.startsWith('== '))).toEqual(['== x: d [at least 2 approvals from outside the largest approving family]']);
+    expect(lines.indexOf('  a bad proposal runs') + 2).toBeLessThan(lines.length);
+    // Nine dogs of two families: 6.3% against 13.9% without the rule.
+    expect(lines.join('\n')).toMatch(/^ {2}9 .* 0 .* 0 .* 6\.3% .* 12\.6%$/m);
+    expect(lines.join('\n')).toMatch(/^ {2}2 .* - .* - .* - .* -$/m);
   });
 
   it('reports all four default failure models when asked for none in particular', () => {
@@ -555,6 +672,24 @@ describe('npm run eval -- --risk', () => {
     expect(lines.filter((line) => line.startsWith('== '))).toEqual(['== custom: error 0.3, shared 0.05, silent 0.']);
   });
 
+  it('takes a rule on outside approvals', async () => {
+    const lines = await run(['--risk', '--error', '0.2', '--shared', '0.1', '--outside', '2']);
+    expect(lines.filter((line) => line.startsWith('== '))).toEqual([
+      '== custom: error 0.2, shared 0.1, silent 0. [at least 2 approvals from outside the largest approving family]',
+    ]);
+    expect(lines.join('\n')).toMatch(/^ {2}9 .* 6\.3% .* 12\.6%$/m);
+    // Zero is the gate as it is.
+    const zero = await run(['--risk', '--error', '0.2', '--outside', '0']);
+    expect(zero.filter((line) => line.startsWith('== '))).toEqual(['== custom: error 0.2, shared 0, silent 0.']);
+  });
+
+  it('refuses an outside count that is missing or not a whole number in range', async () => {
+    for (const args of [['--outside'], ['--outside', ''], ['--outside', 'x'], ['--outside', '1.5'], ['--outside', '-1'], ['--outside', '9']]) {
+      await expect(run(['--risk', ...args]), args.join(' ')).rejects.toThrow(/--outside needs a whole number from 0 to 8/);
+    }
+    expect((await run(['--risk', '--error', '0.1', '--outside', '8'])).length).toBeGreaterThan(10);
+  });
+
   it('accepts the extremes, 0 and 1', async () => {
     expect((await run(['--risk', '--error', '1'])).filter((line) => line.startsWith('== '))).toEqual(['== custom: error 1, shared 0, silent 0.']);
     expect((await run(['--risk', '--error', '0', '--silent', '1'])).filter((line) => line.startsWith('== '))).toEqual(['== custom: error 0, shared 0, silent 1.']);
@@ -574,6 +709,20 @@ describe('npm run eval -- --risk', () => {
   it('refuses a rate that is missing, out of range or not a number', async () => {
     for (const args of [['--error'], ['--error', ''], ['--error', 'x'], ['--shared', '1.5'], ['--silent', '-1'], ['--error', '0.1', '--shared']]) {
       await expect(run(['--risk', ...args]), args.join(' ')).rejects.toThrow(/needs a number from 0 to 1/);
+    }
+  });
+
+  it('writes the rows for the rule it was asked to report', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'risk-'));
+    try {
+      const out = path.join(dir, 'risk.json');
+      await run(['--risk', '--error', '0.2', '--shared', '0.1', '--outside', '2', '--json', out]);
+      const parsed = JSON.parse(fs.readFileSync(out, 'utf8')) as { rows: { mix: string; size: number; complete: boolean; risk: { bad: Odds } }[] }[];
+      const row = parsed[0]?.rows.find((entry) => entry.mix === 'two-families' && entry.size === 9);
+      close(row?.risk.bad.execute ?? -1, 0.06291122176);
+      expect(parsed[0]?.rows.find((entry) => entry.size === 2)?.complete).toBe(false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 
