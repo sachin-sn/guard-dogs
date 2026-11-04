@@ -5,7 +5,7 @@
  *   npm run eval -- --json results.json
  *   npm run eval -- --profile oracle --scenario webshell-upload
  *   npm run eval -- --ablation
- *   npm run eval -- --risk [--error 0.2] [--shared 0.1] [--silent 0.05]
+ *   npm run eval -- --risk [--error 0.2] [--shared 0.1] [--silent 0.05] [--outside 2]
  *
  * Offline: the models are simulated (see `sim.ts`), so the numbers describe
  * the system around the models, not any model.
@@ -15,7 +15,8 @@ import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { ablate, renderAblation, type AblationRow } from './ablation.js';
 import { corpus } from './corpus.js';
-import { FAILURES, renderRisk, riskTable, type NamedFailure, type RiskRow } from './risk.js';
+import { MAX_PANEL_SIZE } from '../src/gate/policy.js';
+import { FAILURES, renderRisk, riskTable, type GateOptions, type NamedFailure, type RiskRow } from './risk.js';
 import { runScenario, type HarnessOptions } from './harness.js';
 import { checkScenario, CATEGORIES, type Scenario } from './scenario.js';
 import { score, summarise, type Score, type Summary } from './score.js';
@@ -90,6 +91,17 @@ function option(args: readonly string[], name: string): string[] {
   return values;
 }
 
+/** The gate option for the report: --outside n makes the gate ask for n approvals from outside the largest approving family. */
+function riskGate(args: readonly string[]): GateOptions {
+  if (!args.includes('--outside')) return {};
+  const raw = option(args, '--outside')[0];
+  const value = raw === undefined || raw.trim() === '' ? Number.NaN : Number(raw);
+  if (!Number.isInteger(value) || value < 0 || value > MAX_PANEL_SIZE - 1) {
+    throw new Error(`--outside needs a whole number from 0 to ${MAX_PANEL_SIZE - 1}`);
+  }
+  return { minOutsideFamily: value };
+}
+
 /** The failure models to report: the default four, or one built from --error, --shared and --silent. */
 function riskFailures(args: readonly string[]): NamedFailure[] {
   const rates = (['--error', '--shared', '--silent'] as const).map((flag) => {
@@ -125,11 +137,12 @@ export async function main(args: readonly string[], print: (line: string) => voi
 
   if (args.includes('--risk')) {
     const failures = riskFailures(args);
+    const gate = riskGate(args);
     print('EXACT PANEL RISK. Every way a panel can vote goes through the real gate. The failure rates are inputs, not measurements.');
-    for (const line of renderRisk(failures)) print(line);
+    for (const line of renderRisk(failures, gate)) print(line);
     const target = option(args, '--json')[0];
     if (target !== undefined) {
-      const out = failures.map((named) => ({ ...named, rows: riskTable(named.failure) satisfies RiskRow[] }));
+      const out = failures.map((named) => ({ ...named, rows: riskTable(named.failure, gate) satisfies RiskRow[] }));
       fs.writeFileSync(target, `${JSON.stringify(out, null, 2)}\n`);
       print(`\nwrote ${target}`);
     }

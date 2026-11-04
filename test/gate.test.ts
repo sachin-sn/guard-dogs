@@ -10,6 +10,7 @@ import {
   evaluateAction,
   MAX_PANEL_SIZE,
   globMatch,
+  panelVerdict,
   type GateContext,
   type GatePolicyInput,
   type HumanApproval,
@@ -498,6 +499,142 @@ describe('majority of the whole panel, at any size', () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('approvals from outside the largest family', () => {
+  // Five dogs: three of family A (three different models) and two of family B.
+  const mixed = [
+    { id: 'dog-1', model: 'a-1', family: 'A', evidenceView: 'raw-logs' },
+    { id: 'dog-2', model: 'a-2', family: 'A', evidenceView: 'summaries' },
+    { id: 'dog-3', model: 'a-3', family: 'A', evidenceView: 'timeline' },
+    { id: 'dog-4', model: 'b-1', family: 'B', evidenceView: 'raw-logs' },
+    { id: 'dog-5', model: 'b-2', family: 'B', evidenceView: 'summaries' },
+  ];
+  const approving = (...ids: number[]) =>
+    mixed.map((member, i) => ({ voter: member.id, decision: (ids.includes(i + 1) ? 'approve' : 'abstain') as Decision }));
+  const decide = (ids: number[], overrides: Partial<GatePolicyInput> = {}) =>
+    evaluateAction(level3({ votes: approving(...ids) }), ctx(), policy({ panel: mixed, ...overrides }));
+
+  it('does nothing by default: three dogs of one family still pass if they use different models', () => {
+    const decision = decide([1, 2, 3]);
+    expect(decision.outcome).toBe('execute');
+    expect(decision.codes).toEqual(['panel-approved']);
+    expect(createGatePolicy({ panel: mixed }).minOutsideFamily).toBe(0);
+  });
+
+  it('holds a majority that came mostly from one family, and releases one with enough from outside it', () => {
+    const cases: [number[], number, boolean][] = [
+      [[1, 2, 3], 0, false],
+      [[1, 2, 4], 1, false],
+      [[1, 4, 5], 1, false],
+      [[1, 2, 4, 5], 2, true],
+      [[1, 2, 3, 4], 1, false],
+      [[1, 2, 3, 4, 5], 2, true],
+      [[2, 3, 4, 5], 2, true],
+    ];
+    for (const [ids, outside, passes] of cases) {
+      const decision = decide(ids, { minOutsideFamily: 2 });
+      expect(decision.outcome, `${ids} (${outside} outside)`).toBe(passes ? 'execute' : 'await-human');
+      expect(decision.codes.includes('panel-one-sided'), `${ids}`).toBe(!passes);
+      expect(decision.codes.includes('panel-approved'), `${ids}`).toBe(passes);
+    }
+  });
+
+  it('takes the number it is given', () => {
+    expect(decide([1, 2, 4], { minOutsideFamily: 1 }).outcome).toBe('execute');
+    expect(decide([1, 2, 4], { minOutsideFamily: 2 }).outcome).toBe('await-human');
+    expect(decide([1, 2, 3, 4, 5], { minOutsideFamily: 3 }).codes).toContain('panel-one-sided');
+  });
+
+  it('is a hold that a person can clear, not a rejection', () => {
+    const action = level3({ votes: approving(1, 2, 3) });
+    const held = evaluateAction(action, ctx(), policy({ panel: mixed, minOutsideFamily: 1 }));
+    expect(held.outcome).toBe('await-human');
+    expect(held.codes).toContain('panel-one-sided');
+    expect(held.reasons).toContain('The panel agreed, but too few of the approvals came from outside the family that approved most.');
+    expect(held.notify.summary).toContain('waiting for a human');
+
+    const cleared = evaluateAction(action, ctx({ humanApproval: approvalFor(action) }), policy({ panel: mixed, minOutsideFamily: 1 }));
+    expect(cleared.outcome).toBe('execute');
+    expect(cleared.codes).toContain('human-approved');
+  });
+
+  it('counts a member with no family as a family of its own', () => {
+    const bare = mixed.map(({ family: _family, ...member }) => member);
+    // Five different models, no families: any three approvals have two outside the largest "family" of one.
+    const decision = evaluateAction(level3({ votes: approving(1, 2, 3) }), ctx(), policy({ panel: bare, minOutsideFamily: 2 }));
+    expect(decision.outcome).toBe('execute');
+    // Two dogs on one model and no family are one family.
+    const twins = [
+      { id: 'dog-1', model: 'm', evidenceView: 'raw-logs' },
+      { id: 'dog-2', model: 'm', evidenceView: 'summaries' },
+      { id: 'dog-3', model: 'n', evidenceView: 'timeline' },
+    ];
+    const pair = evaluateAction(level3({ votes: ballot(3, 2, 1) }), ctx(), policy({ panel: twins, minOutsideFamily: 1, requireDistinctModels: false }));
+    expect(pair.codes).toContain('panel-one-sided');
+  });
+
+  it('puts the model-diversity hold first, and applies on its own when that is waived', () => {
+    const oneModel = mixed.map((member) => ({ ...member, model: 'same' }));
+    const both = decide([1, 2, 3], { panel: oneModel, minOutsideFamily: 1 });
+    expect(both.codes).toContain('panel-not-diverse');
+    expect(both.codes).not.toContain('panel-one-sided');
+    const waived = decide([1, 2, 3], { panel: oneModel, minOutsideFamily: 1, requireDistinctModels: false });
+    expect(waived.codes).toContain('panel-one-sided');
+    expect(waived.codes).not.toContain('panel-not-diverse');
+  });
+
+  it('applies to the approvals that make the majority, and not to a panel that did not agree', () => {
+    const two = decide([1, 2], { minOutsideFamily: 2 });
+    expect(two.codes).toContain('panel-split');
+    expect(two.codes).toContain('minority-flag');
+    expect(two.codes).not.toContain('panel-one-sided');
+    const rejected = evaluateAction(
+      level3({ votes: mixed.map((member) => ({ voter: member.id, decision: 'reject' as Decision })) }),
+      ctx(),
+      policy({ panel: mixed, minOutsideFamily: 2 }),
+    );
+    expect(rejected.outcome).toBe('deny');
+    expect(rejected.codes).not.toContain('panel-one-sided');
+  });
+
+  it('works with a unanimous rule', () => {
+    expect(decide([1, 2, 3, 4], { minOutsideFamily: 1, rule: 'unanimous' }).codes).toContain('panel-split');
+    expect(decide([1, 2, 3, 4, 5], { minOutsideFamily: 2, rule: 'unanimous' }).outcome).toBe('execute');
+    expect(decide([1, 2, 3, 4, 5], { minOutsideFamily: 3, rule: 'unanimous' }).codes).toContain('panel-one-sided');
+  });
+
+  it('shows up in the verdict the panel runner compares', () => {
+    const policyWith = createGatePolicy({ panel: mixed, minOutsideFamily: 1 });
+    expect(panelVerdict(approving(1, 2, 3), policyWith)).toBe('soft:panel-one-sided');
+    expect(panelVerdict(approving(1, 2, 4), policyWith)).toBe('info:panel-approved');
+  });
+
+  it('can only make approval harder: adding an approval never turns a pass into a hold', () => {
+    const policyWith = createGatePolicy({ panel: mixed, minOutsideFamily: 2 });
+    const passes = (ids: number[]) => evaluateAction(level3({ votes: approving(...ids) }), ctx(), { ...policyWith, preApproved: policy().preApproved }).outcome === 'execute';
+    for (let mask = 0; mask < 32; mask++) {
+      const ids = [1, 2, 3, 4, 5].filter((id) => mask & (1 << (id - 1)));
+      if (!passes(ids)) continue;
+      for (const extra of [1, 2, 3, 4, 5]) if (!ids.includes(extra)) expect(passes([...ids, extra]), `${ids} + ${extra}`).toBe(true);
+    }
+  });
+
+  it('is checked when the policy is made', () => {
+    for (const bad of [-1, 1.5, 5, 6, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => createGatePolicy({ panel: mixed, minOutsideFamily: bad }), String(bad)).toThrow(/minOutsideFamily must be a whole number from 0 to one less than the size of the panel/);
+    }
+    expect(createGatePolicy({ panel: mixed, minOutsideFamily: 0 }).minOutsideFamily).toBe(0);
+    expect(createGatePolicy({ panel: mixed, minOutsideFamily: 4 }).minOutsideFamily).toBe(4);
+  });
+
+  it('checks a family when one is given, and keeps it', () => {
+    expect(() => createGatePolicy({ panel: [{ ...mixed[0]!, family: '' }, mixed[3]!] })).toThrow(/dog-1: a family, when given, must be a non-empty name/);
+    expect(() => createGatePolicy({ panel: [{ ...mixed[0]!, family: 7 as unknown as string }, mixed[3]!] })).toThrow(/a family, when given/);
+    expect(createGatePolicy({ panel: mixed }).panel.get('dog-4')?.family).toBe('B');
+    const bare = { id: 'dog-1', model: 'm', evidenceView: 'raw-logs' };
+    expect(createGatePolicy({ panel: [bare, { ...bare, id: 'dog-2' }] }).panel.get('dog-1')).not.toHaveProperty('family');
   });
 });
 

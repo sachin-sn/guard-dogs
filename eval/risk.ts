@@ -51,6 +51,8 @@ export interface GateOptions {
   rule?: 'majority' | 'unanimous';
   requireDistinctModels?: boolean;
   dissentAlertMin?: number;
+  /** Approvals needed from outside the largest approving family. Default 0, the gate's present rule. */
+  minOutsideFamily?: number;
 }
 
 /** What the gate did, over the whole of one truth's probability. The three outcomes add up to 1. */
@@ -67,6 +69,8 @@ export interface Odds {
   split: number;
   /** Waiting because the approvals came from one model. Part of `awaitHuman`. */
   notDiverse: number;
+  /** Waiting because too few approvals came from outside the largest approving family. Part of `awaitHuman`. */
+  oneSided: number;
 }
 
 export interface PanelRisk {
@@ -83,6 +87,7 @@ export interface Cell {
   flagged: boolean;
   split: boolean;
   notDiverse: boolean;
+  oneSided: boolean;
 }
 
 export const MIXES = ['one-model', 'one-family', 'two-families', 'three-families'] as const;
@@ -122,11 +127,12 @@ const tables = new Map<string, readonly Cell[]>();
 
 function policyFor(seats: readonly Seat[], options: GateOptions): GatePolicy {
   return createGatePolicy({
-    panel: seats.map((seat, i) => ({ id: `dog-${i + 1}`, model: seat.model, evidenceView: 'raw-logs' })),
+    panel: seats.map((seat, i) => ({ id: `dog-${i + 1}`, model: seat.model, family: seat.family, evidenceView: 'raw-logs' })),
     preApproved: { 'contain.block-source': { maxTtlSeconds: 1800, targets: ['shop-web:*'] } },
     ...(options.rule === undefined ? {} : { rule: options.rule }),
     ...(options.requireDistinctModels === undefined ? {} : { requireDistinctModels: options.requireDistinctModels }),
     ...(options.dissentAlertMin === undefined ? {} : { dissentAlertMin: options.dissentAlertMin }),
+    ...(options.minOutsideFamily === undefined ? {} : { minOutsideFamily: options.minOutsideFamily }),
   });
 }
 
@@ -141,7 +147,14 @@ function policyFor(seats: readonly Seat[], options: GateOptions): GatePolicy {
  * the action for no other reason, and it refuses to build one that does.
  */
 export function gateTable(seats: readonly Seat[], options: GateOptions = {}, probe: Omit<Partial<ProposedAction>, 'votes'> = {}): readonly Cell[] {
-  const key = JSON.stringify([seats.map((seat) => seat.model), options.rule ?? null, options.requireDistinctModels ?? null, options.dissentAlertMin ?? null, probe]);
+  const key = JSON.stringify([
+    seats.map((seat) => [seat.model, seat.family]),
+    options.rule ?? null,
+    options.requireDistinctModels ?? null,
+    options.dissentAlertMin ?? null,
+    options.minOutsideFamily ?? null,
+    probe,
+  ]);
   const cached = tables.get(key);
   if (cached !== undefined) return cached;
 
@@ -170,13 +183,14 @@ export function gateTable(seats: readonly Seat[], options: GateOptions = {}, pro
     };
     const decision = evaluateAction(action, { now: new Date('2026-10-23T10:16:30Z') }, policy);
     // Anything on the action other than the vote would also move the outcome, and then the table would be about something else.
-    const stray = decision.codes.filter((code) => !['panel-approved', 'panel-rejected', 'panel-split', 'panel-not-diverse', 'minority-flag'].includes(code));
+    const stray = decision.codes.filter((code) => !['panel-approved', 'panel-rejected', 'panel-split', 'panel-not-diverse', 'panel-one-sided', 'minority-flag'].includes(code));
     if (stray.length > 0) throw new Error(`the gate held the test action for a reason other than the vote: ${stray.join(', ')}`);
     cells.push({
       outcome: decision.outcome,
       flagged: decision.codes.includes('minority-flag'),
       split: decision.codes.includes('panel-split'),
       notDiverse: decision.codes.includes('panel-not-diverse'),
+      oneSided: decision.codes.includes('panel-one-sided'),
     });
   }
   tables.set(key, cells);
@@ -191,7 +205,7 @@ function probability(value: unknown, label: string): number {
 }
 
 function emptyOdds(): Odds {
-  return { execute: 0, awaitHuman: 0, deny: 0, dissent: 0, split: 0, notDiverse: 0 };
+  return { execute: 0, awaitHuman: 0, deny: 0, dissent: 0, split: 0, notDiverse: 0, oneSided: 0 };
 }
 
 function add(odds: Odds, cell: Cell, weight: number): void {
@@ -201,6 +215,7 @@ function add(odds: Odds, cell: Cell, weight: number): void {
   if (cell.flagged) odds.dissent += weight;
   if (cell.split) odds.split += weight;
   if (cell.notDiverse) odds.notDiverse += weight;
+  if (cell.oneSided) odds.oneSided += weight;
 }
 
 /**
@@ -270,7 +285,10 @@ export function panelRisk(seats: readonly Seat[], failure: FailureModel = {}, op
 export interface RiskRow {
   mix: Mix;
   size: number;
-  /** False when the make-up needs more seats than the panel has (three families on two seats). */
+  /**
+   * False when the make-up needs more seats than the panel has (three families on two seats), or when the
+   * gate option asks for more approvals from outside the largest family than a panel this size has.
+   */
   complete: boolean;
   risk: PanelRisk;
 }
@@ -280,7 +298,9 @@ export function riskTable(failure: FailureModel, options: GateOptions = {}, mixe
   const rows: RiskRow[] = [];
   for (const mix of mixes) {
     for (let size = 2; size <= MAX_PANEL_SIZE; size++) {
-      rows.push({ mix, size, complete: size >= FAMILY_COUNT[mix], risk: panelRisk(seatsFor(mix, size), failure, options) });
+      const outside = options.minOutsideFamily ?? 0;
+      const complete = size >= FAMILY_COUNT[mix] && size > outside;
+      rows.push({ mix, size, complete, risk: panelRisk(seatsFor(mix, size), failure, complete ? options : { ...options, minOutsideFamily: 0 }) });
     }
   }
   return rows;
@@ -324,7 +344,8 @@ export function renderRisk(failures: readonly NamedFailure[] = FAILURES, options
   const lines: string[] = [];
   for (const named of failures) {
     const rows = riskTable(named.failure, options);
-    lines.push('', `== ${named.id}: ${named.description}`);
+    const rule = (options.minOutsideFamily ?? 0) > 0 ? ` [at least ${options.minOutsideFamily} approvals from outside the largest approving family]` : '';
+    lines.push('', `== ${named.id}: ${named.description}${rule}`);
     lines.push(...grid('a bad proposal runs', rows, MIXES, (risk) => risk.bad.execute));
     lines.push(...grid('a good proposal runs', rows, MIXES, (risk) => risk.good.execute));
     lines.push(...grid('a bad proposal does not run, but the minority alert tells a person', rows, MIXES, (risk) => risk.bad.dissent));
@@ -332,7 +353,7 @@ export function renderRisk(failures: readonly NamedFailure[] = FAILURES, options
   lines.push(
     '',
     '  one-model: every seat the same model. one-family: a different model on each seat, all one family.',
-    '  two-families, three-families: one model per family, seats handed out in turn, as planPanel does. "-": fewer seats than families.',
+    '  two-families, three-families: one model per family, seats handed out in turn, as planPanel does. "-": fewer seats than the make-up or the rule needs.',
   );
   return lines;
 }

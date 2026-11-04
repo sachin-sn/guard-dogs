@@ -37,6 +37,7 @@ export type GateCode =
   | 'protected-target'
   | 'panel-split'
   | 'panel-not-diverse'
+  | 'panel-one-sided'
   // Information.
   | 'minority-flag'
   | 'automatic-level-1-2'
@@ -60,6 +61,7 @@ const REASONS: Readonly<Record<GateCode, string>> = {
   'panel-split': 'The panel did not agree.',
   'minority-flag': 'Several guard dogs flagged this, too few to act on. A human should look.',
   'panel-not-diverse': 'The panel agreed, but the approving guard dogs share one model.',
+  'panel-one-sided': 'The panel agreed, but too few of the approvals came from outside the family that approved most.',
   'automatic-level-1-2': 'Observe and alert actions run automatically and are always reported.',
   'panel-approved': 'The panel agreed.',
   'human-approved': 'A valid human approval cleared the holds.',
@@ -142,6 +144,16 @@ interface Tally {
   count?: VoteCount;
 }
 
+/** How many of the approvals came from outside the family with the most of them. A member with no family is its own. */
+function approvalsOutsideLargestFamily(approving: readonly PanelMember[]): number {
+  const perFamily = new Map<string, number>();
+  for (const member of approving) {
+    const family = member.family ?? member.model;
+    perFamily.set(family, (perFamily.get(family) ?? 0) + 1);
+  }
+  return approving.length - Math.max(0, ...perFamily.values());
+}
+
 function tallyVotes(votes: readonly ActionVote[] | undefined, policy: GatePolicy): Tally {
   const result: Tally = { hard: [], soft: [], info: [] };
   const seen = new Set<string>();
@@ -179,6 +191,7 @@ function tallyVotes(votes: readonly ActionVote[] | undefined, policy: GatePolicy
   if (approving.length >= required) {
     const models = new Set(approving.map((member) => member.model));
     if (policy.requireDistinctModels && models.size < 2) result.soft.push('panel-not-diverse');
+    else if (approvalsOutsideLargestFamily(approving) < policy.minOutsideFamily) result.soft.push('panel-one-sided');
     else result.info.push('panel-approved');
     return result;
   }
