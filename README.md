@@ -91,9 +91,10 @@ flowchart LR
 | `src/pipeline/` | **Sidecar pipeline.** Takes raw events and staged informer records and runs them through masking, tier 1, alert throttling and the executor. Caps how many different alerts go out per window, so fabricated events cannot bury a real alert. Gives the gate a per-proposal snapshot of the evidence it may cite. Includes a bounded JSONL reader. | Tested |
 | `examples/demo.ts` | **Offline demo.** The whole flow end to end with scripted stand-in dogs. Also run by the tests. | Tested |
 | `eval/` | **Evaluation testbed.** A labelled corpus of 21 attack, evasion, injection, noise and benign scenarios, run through the real stack with simulated models (including ones that do as the evidence says), scored, and varied to show who has to be fooled. See [docs/evaluation.md](docs/evaluation.md). `npm run eval`. | Tested; simulated models only |
+| `examples/live-check.ts` | **Live check.** Sends a few made-up cases (no real logs) to the Anthropic and Gemini models you configured and says whether the key, the model name and the answer format work, and whether each answer is the one a careful analyst would give. Only makes network calls when you run it. `npm run live-check`. | Tested against fakes; the first real run is yours |
 | `fixtures/` | Synthetic records, events and actions. Nothing here is a real advisory or a working exploit. | |
 
-Not built yet: the sidecar processes themselves (tailing logs and shipping events to the pipeline), the probe patrol, and an evaluation run against live models.
+Not built yet: the sidecar processes themselves (tailing logs and shipping events to the pipeline), the probe patrol, and an evaluation run against live models (the live check is a smoke test, not an evaluation).
 
 ## Quick start
 
@@ -113,15 +114,38 @@ npm run demo
 
 Nothing calls a model or the network. The guard dogs in the demo are scripted stand-ins whose votes are set per scene; the model registry and planner, masking, throttling, triage, investigator, orchestrator, panel runner, response gate, executor, human approval and expiry are the real code, and in the scene that runs the whole chain the triage and investigator models are scripted replies that go through the real prompts and parsers. It walks through a burst of webshell uploads becoming one alert, four of seven dogs agreeing and the rest being stopped, three against four being rejected while a human is still told, two silent dogs sending a decision to a person, the whole chain from flagged events to an applied containment with no hand-fed proposal, and containment expiring. The tests run it too, so it cannot drift from the code.
 
+### Try Anthropic and Gemini
+
+1. Get a key from the Claude Console (add API credits; API billing is separate from a Claude.ai plan) and one from Google AI Studio. For Gemini, use a key from a Google Cloud project with billing turned on: Google's terms say the unpaid tier uses what you send to improve its products and lets humans read it, and the paid tier does not use your prompts that way.
+2. Put them in a `.env` file, which git ignores:
+
+   ```
+   ANTHROPIC_API_KEY=...
+   GEMINI_API_KEY=...
+   ```
+
+3. Run the check (needs Node 22.9 or newer for the `.env` file):
+
+   ```sh
+   npm run live-check
+   npm run live-check -- --only gemini --show-replies   # one provider, and see what the model wrote
+   ```
+
+   A provider without a key is skipped. The defaults are `claude-haiku-5-5` and `claude-sonnet-5-5` for Anthropic and `gemini-3.5-flash-lite` and `gemini-3.8-flash` for Gemini (small models for triage, larger ones for investigation and votes). Change one with `GUARD_DOGS_CLAUDE_SMALL`, `GUARD_DOGS_CLAUDE_LARGE`, `GUARD_DOGS_GEMINI_SMALL` or `GUARD_DOGS_GEMINI_LARGE`. If Gemini says it "did not finish its answer", raise `--max-output-tokens` (default 800, at most 4096).
+
+   Each line says `ok`, `differs` (the call worked and the model judged otherwise, which is data and not a setup problem) or `FAILED` with what to try. It exits 0 if every call worked, 1 if any failed and 2 if no key was set.
+
+`handling` in the registry is your own statement about how the provider treats what it is sent, and the registry cannot check it. Use `standard` unless you have a written zero-retention arrangement (for Anthropic that is by agreement with their sales team, not a setting).
+
 Use real models. You choose the models and say how to reach each one; the dogs only ever call those.
 
 ```ts
 import { Panel, createGatePolicy, createModelDogs, createModelRegistry, planPanel } from 'guard-dogs';
 
 const registry = createModelRegistry([
-  { id: 'claude-large', provider: 'anthropic', family: 'claude', tier: 'large', handling: 'zero-retention', maxInputChars: 40_000,
+  { id: 'claude-large', provider: 'anthropic', family: 'claude', tier: 'large', handling: 'standard', maxInputChars: 40_000,
     endpoint: 'https://api.anthropic.com/v1/messages' },
-  { id: 'gemini-large', provider: 'google', family: 'gemini', tier: 'large', handling: 'zero-retention', maxInputChars: 40_000,
+  { id: 'gemini-large', provider: 'google', family: 'gemini', tier: 'large', handling: 'standard', maxInputChars: 40_000,
     endpoint: 'https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent' },
   { id: 'local-large', provider: 'selfhosted', family: 'open', tier: 'large', handling: 'self-hosted', maxInputChars: 40_000,
     endpoint: 'https://llm.internal.example/v1/chat/completions' },
