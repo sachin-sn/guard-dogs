@@ -5,6 +5,7 @@
  *   npm run eval -- --json results.json
  *   npm run eval -- --profile oracle --scenario webshell-upload
  *   npm run eval -- --ablation
+ *   npm run eval -- --risk [--error 0.2] [--shared 0.1] [--silent 0.05]
  *
  * Offline: the models are simulated (see `sim.ts`), so the numbers describe
  * the system around the models, not any model.
@@ -14,6 +15,7 @@ import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { ablate, renderAblation, type AblationRow } from './ablation.js';
 import { corpus } from './corpus.js';
+import { FAILURES, renderRisk, riskTable, type NamedFailure, type RiskRow } from './risk.js';
 import { runScenario, type HarnessOptions } from './harness.js';
 import { checkScenario, CATEGORIES, type Scenario } from './scenario.js';
 import { score, summarise, type Score, type Summary } from './score.js';
@@ -88,6 +90,25 @@ function option(args: readonly string[], name: string): string[] {
   return values;
 }
 
+/** The failure models to report: the default four, or one built from --error, --shared and --silent. */
+function riskFailures(args: readonly string[]): NamedFailure[] {
+  const rates = (['--error', '--shared', '--silent'] as const).map((flag) => {
+    if (!args.includes(flag)) return undefined;
+    const raw = option(args, flag)[0];
+    const value = raw === undefined || raw.trim() === '' ? Number.NaN : Number(raw);
+    if (!(value >= 0 && value <= 1)) throw new Error(`${flag} needs a number from 0 to 1`);
+    return value;
+  });
+  const [error, shared, silent] = rates;
+  if (error === undefined && shared === undefined && silent === undefined) return [...FAILURES];
+  const failure = {
+    ...(error === undefined ? {} : { error }),
+    ...(shared === undefined ? {} : { shared }),
+    ...(silent === undefined ? {} : { silent }),
+  };
+  return [{ id: 'custom', description: `error ${error ?? 0}, shared ${shared ?? 0}, silent ${silent ?? 0}.`, failure }];
+}
+
 /** The command line. `print` is where the report goes. */
 export async function main(args: readonly string[], print: (line: string) => void = console.log): Promise<void> {
   if (args.includes('--ablation')) {
@@ -97,6 +118,19 @@ export async function main(args: readonly string[], print: (line: string) => voi
     const target = option(args, '--json')[0];
     if (target !== undefined) {
       fs.writeFileSync(target, `${JSON.stringify(rows satisfies AblationRow[], null, 2)}\n`);
+      print(`\nwrote ${target}`);
+    }
+    return;
+  }
+
+  if (args.includes('--risk')) {
+    const failures = riskFailures(args);
+    print('EXACT PANEL RISK. Every way a panel can vote goes through the real gate. The failure rates are inputs, not measurements.');
+    for (const line of renderRisk(failures)) print(line);
+    const target = option(args, '--json')[0];
+    if (target !== undefined) {
+      const out = failures.map((named) => ({ ...named, rows: riskTable(named.failure) satisfies RiskRow[] }));
+      fs.writeFileSync(target, `${JSON.stringify(out, null, 2)}\n`);
       print(`\nwrote ${target}`);
     }
     return;
