@@ -26,6 +26,8 @@ npm run eval                                          # every profile, every sce
 npm run eval -- --json results.json                   # also write the scores and summaries as JSON
 npm run eval -- --profile oracle --scenario webshell-upload
 npm run eval -- --ablation                            # who has to be fooled (see below)
+npm run eval -- --risk                                # the exact risk of a panel (see below)
+npm run eval -- --risk --error 0.2 --shared 0.1       # the same, for your own rates
 ```
 
 The clock is fake, so a scenario that spans forty minutes takes milliseconds, and a run is repeatable. "Seconds to contain" is on that clock: it measures how long the attack waited for events and windows, not how long models take to answer.
@@ -107,6 +109,74 @@ What it shows:
 - **One triage model is a single point of failure for being ignored.** A fooled one drops the incident before anyone investigates it; a person still has the alert. A second model of another family fixes it (any one can escalate) for one more triage call per batch (6 calls to 7).
 - **A person is told in every row**, because tier 1 alerts before any model is asked. In the rows where the victim is blocked, the person also gets the decision, naming the panel count ("2 of 3 approved"), and the block is undone when its ten minutes are up.
 
+## Panel risk, exactly
+
+`npm run eval -- --risk` answers a question the ablation cannot: if each dog can be wrong, how often does the gate let a bad action run, and how often a good one, as the panel grows or takes its models from different families?
+
+It is computed, not sampled. Every way a panel of 2 to 9 dogs can vote (approve, reject or say nothing, so up to 19,683 ways) is put through the real gate, `evaluateAction`, with a pre-approved containment. The majority rule, the model-diversity rule and the minority alert are therefore the gate's own, and a change to the gate changes these numbers. Each way of voting is then weighted by a small failure model:
+
+| Rate | Meaning |
+|---|---|
+| `error` | A dog in a family that is not fooled still votes wrongly, on its own, with this probability. |
+| `shared` | The chance that a whole model family is fooled at once: the same blind spot, the same injected notice. Every dog of a fooled family votes wrongly. Families are fooled independently of each other. |
+| `silent` | A dog gives no usable vote (a timeout, a refusal, unreadable output). It counts as not agreeing. |
+
+"Wrongly" means approving a bad proposal, or rejecting a good one. A *bad* proposal is one that should not run (an innocent address); a *good* one should (the real attacker). Four make-ups are compared. **One model**: every seat the same model, which the gate never lets act alone. **One family**: a different model on every seat, all of one family, like a panel of one vendor's large and small models; the gate counts them as different and their blind spots are shared. **Two** and **three families**: one model per family, seats handed out in turn, which is what `planPanel` makes.
+
+**The rates are inputs, not findings.** Nobody has measured how often a model is fooled; the defaults (20% on its own, 10% for a whole family, 10% silent) are chosen to be easy to read and to match the 20% quoted in the design notes. What the module settles exactly is the structure: what panel size buys, what composition buys, and where the floor is. Run it with your own rates once you have some.
+
+### What it shows
+
+With 20% independent error and nothing shared, the chance that a bad proposal runs is 4.0, 10.4, 2.7, 5.8, 1.7, 3.3, 1.0 and 2.0% for panels of 2 to 9 dogs of one family, and a good proposal runs 64.0, 89.6, 81.9, 94.2, 90.1, 96.7, 94.4 and 98.0% of the time. For odd sizes these are the 90, 94, 97 and 98% quoted in the design notes, now reproduced by the gate and not by a binomial formula.
+
+1. **Even sizes are safer and less useful than the odd size below them.** Four dogs need three to agree: a bad proposal runs 2.7% of the time against 10.4% with three, and a good one 81.9% against 89.6%. The difference becomes cases for a person, and the minority alert (below) fires more often. Odd sizes are right when availability matters; even sizes when a wrong containment costs more than a late one.
+
+2. **Shared failure sets a floor that more dogs of the same family do not lower.** Suppose a family is fooled 10% of the time and dogs never err on their own:
+
+   | dogs | one family | two families | three families |
+   |---:|---:|---:|---:|
+   | 2 | 10.0% | 1.0% | – |
+   | 3 | 10.0% | 1.0% | 2.8% |
+   | 4 | 10.0% | 1.0% | 1.9% |
+   | 5 to 9 | 10.0% | 1.0% | 2.8% |
+
+   Nine dogs of one vendor are as exposed to its blind spot as one dog. Two families bring the floor to the square of the rate, because the approving dogs must come from two models and, with one model per family, a fooled family cannot approve alone. Three families are *worse* than two, not better: any two fooled families make a majority of three, so the floor is the chance that two of three are fooled (3c²(1−c) + c³). More families are better only when the rule needs more of them to agree than are likely to fail together.
+
+3. **A bigger panel can be worse.** With both kinds of failure (20% on their own, 10% shared), the chance that a bad proposal runs, and that a good one does:
+
+   | dogs | one family: bad / good | two families: bad / good | three families: bad / good |
+   |---:|---:|---:|---:|
+   | 2 | 13.6% / 57.6% | 7.8% / 51.8% | – |
+   | 3 | 19.4% / 80.6% | 11.9% / 62.2% | 19.1% / 80.9% |
+   | 4 | 12.4% / 73.7% | 9.7% / 66.4% | 8.8% / 68.0% |
+   | 5 | 15.2% / 84.8% | 12.9% / 74.6% | 16.4% / 83.6% |
+   | 6 | 11.5% / 81.1% | 11.2% / 73.0% | 8.4% / 75.6% |
+   | 7 | 13.0% / 87.0% | 13.3% / 78.0% | 14.3% / 85.7% |
+   | 8 | 10.9% / 84.9% | 12.5% / 76.4% | 8.6% / 79.4% |
+   | 9 | 11.8% / 88.2% | 13.9% / 79.4% | 12.6% / 87.4% |
+
+   On odd sizes the two-family column rises from 11.9% at three dogs to 13.9% at nine, and from seven dogs up it is worse than the single-family panel. The reason is the diversity rule. On three dogs (A, B, A) a fooled family A has two seats, a majority, but both are one model, so the gate waits for a person: 9.8% of bad proposals end that way. On nine dogs (five A, four B) the same fooled family still has a majority, and now one wrong dog among the four of family B (probability 59% at 20% error) is enough to satisfy "the approving dogs span two models". **The diversity rule is a minimum, and one stray vote satisfies it.** On a larger panel it protects less.
+
+   This is a finding about the gate, recorded here and not fixed here. A stricter rule would ask that approvals from outside the largest approving family reach some share of the votes required, so that a fooled family needs more than one accomplice. It would be a change to the panel rule the design describes (a majority, of at least two models), so it needs a decision before it is built.
+
+4. **A three-dog panel from two families wastes a seat.** With seats A, B, A, a good proposal approved only by the two A dogs waits for a person. At 20% independent error that costs 13 points of availability against three families (76.8% against 89.6%), for 3 points less risk (7.2% against 10.4%). Planned panels of three should come from three families; from two, use four seats (two each).
+
+5. **Silence is safe and expensive.** A dog that gives no usable vote never agrees. With one dog in ten silent, five dogs of one family run a bad proposal 13.8% of the time (15.2% with none silent) and a good one 77.6% of the time (84.8%). Deadlines, retries and the choice of models that answer reliably are therefore availability measures, not safety measures; the gate's default for a dog that does not answer is the safe one.
+
+6. **The minority alert earns its keep on panels of four or more.** On two and three dogs it cannot fire (it needs two approvals and fewer than a majority). On seven dogs with 20% independent error, 11.5% of bad proposals are not run but reach a person because exactly three dogs approved, which is the case described in the design (three for, four against). On nine dogs 24.2% are. With shared failure, panels of more families raise the alert more often (33.6% on nine dogs of three families, against 21.8% of one), because a fooled family is a block of dissent that is not a majority.
+
+7. **One model never acts alone**, however many seats it has. The bad-proposal column for it is 0 everywhere, and so is the good-proposal column; every approval is a wait for a person. That is what the rule is for, and the cost of a panel built from one model.
+
+### What it leaves out
+
+- **The rates are assumed.** See above. Only the shape of the answer is exact.
+- **Fooled is all or nothing.** A family is either fooled, and every dog of it votes wrongly, or not. Real families fail partly and by wording. This is pessimistic about a fooled family and optimistic about the rest.
+- **Dogs err independently once the family is not fooled.** Two seats of one model on different evidence views probably fail together more than that.
+- **Families fail independently of each other.** An injected notice that works on every family is the `everyone-fooled` row of the ablation, not a case here.
+- **The same rates for good and bad proposals.** Models plausibly miss an attack more often than they invent one.
+- **Only the panel.** The investigator that wrote the proposal is assumed to have proposed something worth voting on. The ablation covers the pipeline; this covers the vote.
+- **No adaptive attacker.** The attacker does not choose which family to fool.
+
 ## Findings so far
 
 These came from writing the scenarios, and each is fixed or recorded.
@@ -117,22 +187,25 @@ These came from writing the scenarios, and each is fixed or recorded.
 4. **The masker makes the notice point at the pseudonym.** An attacker who writes an address into a file name has it replaced by the pseudonym like any other, so the notice a fooled model follows names exactly the target the investigator was offered. Masking does not defend against this, and was not meant to.
 5. **The file name is attacker text that every view carries.** `summaryView` keeps what the rule found (finding 1), and the rule found the file name. A reviewer with a short view is therefore reached by any text in the field the rule reports. Not changed here. The options are to cut or hash free text in `flagged.*` for the summary view, which loses information a reviewer needs, or to rely on the other guards: a panel of families that are not all fooled by the same wording, targets the deployer offers that an attacker cannot write, and the bound on what a won vote can do.
 6. **Deployers must not offer a target an attacker can write.** The two forgeable-target scenarios exist only because the deployer offered the client address from a header. The investigator offers nothing the deployer did not list, so this is the deployer's one lever. It belongs in the best-practices section: take the address from the connection, not from a forwarded header, or do not offer address blocking at all.
+7. **The model-diversity rule is a minimum that one stray vote satisfies.** On a nine-dog panel of two families, a fooled family's majority is released by one wrong dog of the other family, so a bigger two-family panel runs a bad proposal more often than a small one when failures are shared (13.9% on nine dogs against 11.9% on three, at 20% error and 10% shared). Found by the panel-risk model (above), not yet changed. One option is to require that a share of the approvals come from outside the largest approving family, so a fooled family needs more than one accomplice; the model can compare that against the present rule before anything is built.
+8. **Panels of one vendor's models are one dog against a shared blind spot.** The planner refuses to build one and `analyzePanel` flags a hand-built one; the model puts a number on why (10.0% at any size, for a family that is fooled 10% of the time).
 
 ## How the testbed itself is checked
 
-The tests hold the corpus to `checkScenario`, hold the oracle to the outcome each scenario says it should reach, pin every row of the ablation, test each notice `injectable` obeys (and each near miss it must not), the family it obeys and the view that carries the text, and score hand-made run records so that every measure can be seen to move (a measure that is always zero in real runs would otherwise prove nothing). A first sweep of 50 deliberate breakages of the scoring, the harness, the simulated models and the summaries found 31 that the tests did not catch, mostly because the safety measures read zero in every real run; the hand-made records and the direct tests of the simulated models were added for that. A second sweep of 54 found 3. One was a rate whose two readings happened to agree on the test data, now fixed. The other two change nothing the corpus can show: the clock's start time, which would matter only if events fell near an incident-window boundary, and the harness counting only containments as applied, when no scenario triggers any other action that a control adapter would see. A third sweep of 92 breakages of the failure profiles, the harness options and the ablation found 11 the tests did not catch: the edges of the three notices (a word that merely contains one, an address one digit short), how the report words a forbidden target that was proposed and one that was applied, and the order of two columns. Each now has a test. Two are equivalent and are left: an investigator told to block an address it has not been told about is already refused by the check that the address was offered, and the name given to the simulated model in an ablation row is not part of the row.
+The tests hold the corpus to `checkScenario`, hold the oracle to the outcome each scenario says it should reach, pin every row of the ablation, test each notice `injectable` obeys (and each near miss it must not), the family it obeys and the view that carries the text, and score hand-made run records so that every measure can be seen to move (a measure that is always zero in real runs would otherwise prove nothing). A first sweep of 50 deliberate breakages of the scoring, the harness, the simulated models and the summaries found 31 that the tests did not catch, mostly because the safety measures read zero in every real run; the hand-made records and the direct tests of the simulated models were added for that. A second sweep of 54 found 3. One was a rate whose two readings happened to agree on the test data, now fixed. The other two change nothing the corpus can show: the clock's start time, which would matter only if events fell near an incident-window boundary, and the harness counting only containments as applied, when no scenario triggers any other action that a control adapter would see. A third sweep of 92 breakages of the failure profiles, the harness options and the ablation found 11 the tests did not catch: the edges of the three notices (a word that merely contains one, an address one digit short), how the report words a forbidden target that was proposed and one that was applied, and the order of two columns. Each now has a test. Two are equivalent and are left: an investigator told to block an address it has not been told about is already refused by the check that the address was offered, and the name given to the simulated model in an ablation row is not part of the row. A sweep of 140 breakages of the panel-risk model and its command line found 16 the tests did not catch. Thirteen were real gaps: the order in which a vote is turned into a table index (which no symmetric panel can show, so uneven panels were added to the checks), the guard that the gate held the action only for the vote, the bounds on panel size, the bounds on a rate given on the command line, and how the report is laid out and labelled. Each now has a test, and the guard is shown working by a probe that changes the action. Four are equivalent and are left: the number of families that one-model and one-family panels are said to need (a panel always has at least two seats), a type check that `Number.isFinite` already makes, and the order of a spread that cannot carry votes.
 
 ## Threats to validity
 
 - **Simulated models.** Stated above. Nothing here is evidence about how real models behave.
 - **A small, hand-made corpus.** Twenty-one scenarios written by the designer test the properties the designer thought of. They are a regression suite and a set of examples, not a sample of real traffic.
 - **Markers.** The oracle recognises an attack by strings chosen by the scenario's author, so it is right by construction. It is a reference point, not a measurement.
-- **Fooled is all or nothing, by family.** A real model is argued with to a degree, depending on the wording, and two models of one family do not fail together every time. The ablation shows which failures a design survives, not how often they happen. That needs real models, and the panel-risk model below.
+- **Fooled is all or nothing, by family.** A real model is argued with to a degree, depending on the wording, and two models of one family do not fail together every time. The ablation shows which failures a design survives, not how often they happen. That needs real models. The panel-risk model above treats it the other way round: a fooled family is wholly fooled, and the rate is an input.
+- **Assumed rates.** The panel-risk tables are exact for the rates they are given and carry no information about the rates themselves. Quote them as "if", never as "is".
 - **Fixed deployment.** One policy, one panel size, one pre-approval table. The options (`panelSize`, `investigators`, `triage`) let the tests vary them; the results above use the defaults (three dogs of three families, two investigators, triage on).
 - **One service, no background traffic.** Scenarios are short and isolated. Interaction between many services, or a long period of noise, is not tested.
 
 ## What comes next
 
-1. An exact model of the panel's risk: family-wide failures and independent errors, combined to give the probability that a bad action is applied, and that a person is told of a dissent, by panel size and composition. The ablation shows the cases; this gives the curve.
-2. A profile that calls real models through the adapters, run on the same corpus and the ablation, which is where the "fooled" rules get replaced by measurements.
+1. A decision on the diversity rule (finding 7), with this model as the way to compare the options before anything is built.
+2. A profile that calls real models through the adapters, run on the same corpus and the ablation, which is where the "fooled" rules and the rates above get replaced by measurements.
 3. Scenarios from public incident write-ups, once the first two are in.
