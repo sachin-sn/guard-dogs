@@ -38,13 +38,16 @@ export interface Seat {
   model: string;
 }
 
+/** Each rate is one number for every family, or a number per family (families not named get 0). Default 0. */
+export type Rate = number | Readonly<Record<string, number>>;
+
 export interface FailureModel {
-  /** Chance a dog gives no usable vote. Default 0. */
-  silent?: number;
-  /** Chance a dog in an unfooled family votes wrongly, on its own. Default 0. */
-  error?: number;
-  /** Chance that a family is fooled, for all families or per family. Families not named get 0. Default 0. */
-  shared?: number | Readonly<Record<string, number>>;
+  /** Chance a dog gives no usable vote. */
+  silent?: Rate;
+  /** Chance a dog in an unfooled family votes wrongly, on its own. */
+  error?: Rate;
+  /** Chance that a family is fooled, so that all its dogs vote wrongly at once. */
+  shared?: Rate;
 }
 
 export interface GateOptions {
@@ -204,6 +207,21 @@ function probability(value: unknown, label: string): number {
   return value;
 }
 
+/** A rate given for every family or one by one, as the rate each family on the panel has. Families not named get 0. */
+function ratesFor(value: number | Readonly<Record<string, number>> | undefined, label: string, families: readonly string[]): Map<string, number> {
+  const rates = new Map<string, number>();
+  if (typeof value !== 'object' || value === null) {
+    const rate = probability(value ?? 0, label);
+    for (const family of families) rates.set(family, rate);
+    return rates;
+  }
+  for (const name of Object.keys(value)) {
+    if (!families.includes(name)) throw new RangeError(`${label} names the family "${name}", which has no seat on this panel`);
+  }
+  for (const family of families) rates.set(family, probability(Object.hasOwn(value, family) ? value[family] : 0, `${label} for ${family}`));
+  return rates;
+}
+
 function emptyOdds(): Odds {
   return { execute: 0, awaitHuman: 0, deny: 0, dissent: 0, split: 0, notDiverse: 0, oneSided: 0 };
 }
@@ -228,27 +246,23 @@ function add(odds: Odds, cell: Cell, weight: number): void {
 export function panelRisk(seats: readonly Seat[], failure: FailureModel = {}, options: GateOptions = {}): PanelRisk {
   const n = seats.length;
   if (n < 2 || n > MAX_PANEL_SIZE) throw new RangeError(`a panel has 2 to ${MAX_PANEL_SIZE} dogs`);
-  const silent = probability(failure.silent ?? 0, 'silent');
-  const error = probability(failure.error ?? 0, 'error');
-
   const families = [...new Set(seats.map((seat) => seat.family))];
-  const shared = failure.shared ?? 0;
-  const sharedOf = new Map<string, number>();
-  if (typeof shared === 'number') {
-    const value = probability(shared, 'shared');
-    for (const family of families) sharedOf.set(family, value);
-  } else {
-    for (const name of Object.keys(shared)) {
-      if (!families.includes(name)) throw new RangeError(`shared names the family "${name}", which has no seat on this panel`);
-    }
-    for (const family of families) sharedOf.set(family, probability(Object.hasOwn(shared, family) ? shared[family] : 0, `shared for ${family}`));
-  }
+  const silentOf = ratesFor(failure.silent, 'silent', families);
+  const errorOf = ratesFor(failure.error, 'error', families);
+  const sharedOf = ratesFor(failure.shared, 'shared', families);
 
   const seatsOf = families.map((family) => seats.flatMap((seat, i) => (seat.family === family ? [i] : [])));
   const table = gateTable(seats, options);
-  // By status digit: right, wrong, silent.
-  const okWeight = [(1 - silent) * (1 - error), (1 - silent) * error, silent] as const;
-  const foolWeight = [0, 1 - silent, silent] as const;
+  // By family, then by status digit: right, wrong, silent.
+  const okWeight = families.map((family) => {
+    const silent = silentOf.get(family) as number;
+    const error = errorOf.get(family) as number;
+    return [(1 - silent) * (1 - error), (1 - silent) * error, silent] as const;
+  });
+  const foolWeight = families.map((family) => {
+    const silent = silentOf.get(family) as number;
+    return [0, 1 - silent, silent] as const;
+  });
 
   const bad = emptyOdds();
   const good = emptyOdds();
@@ -262,8 +276,8 @@ export function panelRisk(seats: readonly Seat[], failure: FailureModel = {}, op
       let fooled = 1;
       for (const seat of seatsOf[f] as number[]) {
         const digit = digits[seat] as number;
-        ok *= okWeight[digit] as number;
-        fooled *= foolWeight[digit] as number;
+        ok *= (okWeight[f] as readonly number[])[digit] as number;
+        fooled *= (foolWeight[f] as readonly number[])[digit] as number;
       }
       const c = sharedOf.get(families[f] as string) as number;
       weight *= c * fooled + (1 - c) * ok;

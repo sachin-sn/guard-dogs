@@ -27,7 +27,8 @@
     "check": "npm run typecheck && npm test",
     "demo": "npm run build && node dist/examples/demo.js",
     "eval": "npm run build && node dist/eval/run.js",
-    "live-check": "npm run build && node dist/examples/live-check.js"
+    "live-check": "npm run build && node dist/examples/live-check.js",
+    "profile": "npm run build && node dist/examples/profile.js"
   },
   "dependencies": {
     "ajv": "^8.17.1",
