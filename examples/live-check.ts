@@ -404,6 +404,23 @@ function number(args: readonly string[], name: string): number | undefined {
   return value;
 }
 
+/**
+ * Read keys from a `.env` file into the environment, without the `--env-file`
+ * flag, which older Node 22 releases do not know. Variables that are already
+ * set win, as with the flag. A missing file is fine. A file that cannot be read
+ * is reported by its error code only: what the file holds is never printed.
+ */
+export function loadDotEnv(file: string, load: (path: string) => void = (path) => process.loadEnvFile(path)): 'loaded' | 'missing' | string {
+  try {
+    load(file);
+    return 'loaded';
+  } catch (error) {
+    const code = typeof error === 'object' && error !== null && 'code' in error ? String((error as { code: unknown }).code) : undefined;
+    if (code === 'ENOENT') return 'missing';
+    return `Could not read ${file}${code === undefined ? '' : ` (${code})`}; going on with the environment as it is.`;
+  }
+}
+
 /** Returns the exit code: 0 all worked, 1 something failed, 2 nothing was configured. */
 export async function main(
   args: readonly string[],
@@ -437,5 +454,7 @@ export async function main(
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const loaded = loadDotEnv('.env');
+  if (loaded !== 'loaded' && loaded !== 'missing') console.error(loaded);
   process.exitCode = await main(process.argv.slice(2), process.env);
 }
