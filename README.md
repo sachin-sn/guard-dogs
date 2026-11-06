@@ -91,10 +91,11 @@ flowchart LR
 | `src/pipeline/` | **Sidecar pipeline.** Takes raw events and staged informer records and runs them through masking, tier 1, alert throttling and the executor. Caps how many different alerts go out per window, so fabricated events cannot bury a real alert. Gives the gate a per-proposal snapshot of the evidence it may cite. Includes a bounded JSONL reader. | Tested |
 | `examples/demo.ts` | **Offline demo.** The whole flow end to end with scripted stand-in dogs. Also run by the tests. | Tested |
 | `eval/` | **Evaluation testbed.** A labelled corpus of 21 attack, evasion, injection, noise and benign scenarios, run through the real stack with simulated models (including ones that do as the evidence says), scored, and varied to show who has to be fooled; plus an exact model of how risky a panel is by size and make-up (every way of voting, through the real gate). See [docs/evaluation.md](docs/evaluation.md). `npm run eval`, `npm run eval -- --risk`. | Tested; simulated models only |
-| `examples/live-check.ts` | **Live check.** Sends a few made-up cases (no real logs) to the Anthropic and Gemini models you configured and says whether the key, the model name and the answer format work, and whether each answer is the one a careful analyst would give. Only makes network calls when you run it. `npm run live-check`. | Tested against fakes; the first real run is yours |
+| `examples/live-check.ts` | **Live check.** Sends a few made-up cases (no real logs) to the Anthropic and Gemini models you configured and says whether the key, the model name and the answer format work, and whether each answer is the one a careful analyst would give. Only makes network calls when you run it. `npm run live-check`. | Tested against fakes. Run once against both providers: the Anthropic models and `gemini-3.5-flash-lite` worked, `gemini-3.8-flash` answered HTTP 503 on that run |
+| `examples/profile.ts`, `eval/live.ts` | **Live profile.** Sends labelled cases from the evaluation corpus (the real prompts the system builds, made-up data) to the Anthropic and Gemini models you configured, several times each, and counts how often a model gives no usable answer, how often it is wrong on a case most of the time (a blind spot) and how often it slips at random. Then it puts those rates into the exact panel-risk model, with the cautious end of a 95% interval beside the measured rate. It spends API credit, so it sends nothing without `--run` and refuses a plan over `--max-calls`. `npm run profile`. | Tested against fakes; no real run yet |
 | `fixtures/` | Synthetic records, events and actions. Nothing here is a real advisory or a working exploit. | |
 
-Not built yet: the sidecar processes themselves (tailing logs and shipping events to the pipeline), the probe patrol, and an evaluation run against live models (the live check is a smoke test, not an evaluation).
+Not built yet: the sidecar processes themselves (tailing logs and shipping events to the pipeline) and the probe patrol. The live profile is built but has not been run against real models, so every rate in the evaluation is still an assumption.
 
 ## Quick start
 
@@ -134,6 +135,18 @@ Nothing calls a model or the network. The guard dogs in the demo are scripted st
    A provider without a key is skipped. The defaults are `claude-haiku-5-5` and `claude-sonnet-5-5` for Anthropic and `gemini-3.5-flash-lite` and `gemini-3.8-flash` for Gemini (small models for triage, larger ones for investigation and votes). Change one with `GUARD_DOGS_CLAUDE_SMALL`, `GUARD_DOGS_CLAUDE_LARGE`, `GUARD_DOGS_GEMINI_SMALL` or `GUARD_DOGS_GEMINI_LARGE`. If Gemini says it "did not finish its answer", raise `--max-output-tokens` (default 800, at most 4096).
 
    Each line says `ok`, `differs` (the call worked and the model judged otherwise, which is data and not a setup problem) or `FAILED` with what to try. It exits 0 if every call worked, 1 if any failed and 2 if no key was set.
+
+   On the first real run, every Anthropic call and the Gemini small model worked. `gemini-3.8-flash` answered HTTP 503 on all four calls (one of them timed out), and set to `gemini-3.5-flash-lite` the large slot worked. A 503 is the provider's side and often passes, but the name is not confirmed, so run the check before relying on it and set `GUARD_DOGS_GEMINI_LARGE` to a model that answers.
+
+4. Measure how the models do on the evaluation corpus (optional, and it spends credit: about 200 calls with the default plan):
+
+   ```sh
+   npm run profile                 # shows the plan and the number of calls; sends nothing
+   npm run profile -- --run        # sends them and prints the report
+   npm run profile -- --run --runs 5 --max-calls 400 --json profile.json
+   ```
+
+   Each large model gets 16 votes and 8 investigations, each small model 10 triage requests, each asked 3 times. `--votes`, `--investigations`, `--triage` and `--runs` change that, and `--max-calls` (default 300) stops a plan that would cost more than you meant to spend. The JSON holds counts and outcomes only, never what a model wrote.
 
 `handling` in the registry is your own statement about how the provider treats what it is sent, and the registry cannot check it. Use `standard` unless you have a written zero-retention arrangement (for Anthropic that is by agreement with their sales team, not a setting).
 

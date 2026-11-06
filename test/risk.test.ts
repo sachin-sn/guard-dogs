@@ -535,6 +535,58 @@ describe('panelRisk, in general', () => {
   });
 });
 
+describe('panelRisk, with a rate for each family', () => {
+  // Three seats: family-a, family-b, family-a (the planner's shape for two families). Without the diversity rule, two approvals run an action.
+  const seats = seatsFor('two-families', 3);
+  const open: GateOptions = { requireDistinctModels: false };
+
+  it('uses the silence of each family on its own seats', () => {
+    // Family b silent: family a's two dogs still make a majority of three.
+    close(panelRisk(seats, { silent: { 'family-a': 0, 'family-b': 1 } }, open).good.execute, 1);
+    // Family a silent: one dog of b cannot.
+    close(panelRisk(seats, { silent: { 'family-a': 1, 'family-b': 0 } }, open).good.execute, 0);
+    close(panelRisk(seats, { silent: { 'family-a': 1, 'family-b': 0 } }, open).good.awaitHuman, 1);
+    // The same number for everyone is the same as naming every family.
+    close(panelRisk(seats, { silent: 0.3 }, open).good.execute, panelRisk(seats, { silent: { 'family-a': 0.3, 'family-b': 0.3 } }, open).good.execute);
+  });
+
+  it('uses the slips of each family on its own seats', () => {
+    // Family a always wrong on a bad proposal: both its dogs approve, and that is a majority.
+    close(panelRisk(seats, { error: { 'family-a': 1, 'family-b': 0 } }, open).bad.execute, 1);
+    // Family b always wrong: one approval against two rejections.
+    close(panelRisk(seats, { error: { 'family-a': 0, 'family-b': 1 } }, open).bad.execute, 0);
+    // Family a always wrong on a good proposal: two rejections, which is a majority to reject.
+    close(panelRisk(seats, { error: { 'family-a': 1, 'family-b': 0 } }, open).good.deny, 1);
+    close(panelRisk(seats, { error: { 'family-a': 0, 'family-b': 1 } }, open).good.execute, 1);
+    // Half-wrong, independently, on family a's two seats, and family b right: a bad proposal runs only if both are wrong.
+    close(panelRisk(seats, { error: { 'family-a': 0.5 } }, open).bad.execute, 0.25);
+    close(panelRisk(seats, { error: { 'family-a': 0.5, 'family-b': 0 } }, open).bad.execute, 0.25);
+  });
+
+  it('gives a family not named a rate of 0, and the same rate to every family when given one number', () => {
+    close(panelRisk(seats, { error: { 'family-a': 1 } }, open).bad.execute, 1);
+    close(panelRisk(seats, { silent: { 'family-b': 1 } }, open).good.execute, 1);
+    close(panelRisk(seats, { error: 0.2 }, open).bad.execute, panelRisk(seats, { error: { 'family-a': 0.2, 'family-b': 0.2 } }, open).bad.execute);
+  });
+
+  it('combines the three kinds of rate, each by family', () => {
+    // Family a: fooled 1 in 4, never slips, never silent. Family b: never fooled, always silent. A bad proposal then
+    // gets, at most, family a's two approvals: it runs exactly when family a is fooled (without the diversity rule).
+    close(panelRisk(seats, { shared: { 'family-a': 0.25 }, silent: { 'family-b': 1 } }, open).bad.execute, 0.25);
+    // With the rule on, two approvals from one model are held, and b is silent: it never runs.
+    close(panelRisk(seats, { shared: { 'family-a': 0.25 }, silent: { 'family-b': 1 } }).bad.execute, 0);
+  });
+
+  it('refuses a family with no seat, and a rate that is not a probability, for silence and slips as for blind spots', () => {
+    expect(() => panelRisk(seats, { silent: { 'family-z': 0.1 } })).toThrow(/silent names the family "family-z", which has no seat on this panel/);
+    expect(() => panelRisk(seats, { error: { 'family-z': 0.1 } })).toThrow(/error names the family "family-z", which has no seat on this panel/);
+    for (const bad of [-0.1, 1.1, Number.NaN]) {
+      expect(() => panelRisk(seats, { silent: { 'family-a': bad } })).toThrow(/silent for family-a must be a number from 0 to 1/);
+      expect(() => panelRisk(seats, { error: { 'family-b': bad } })).toThrow(/error for family-b must be a number from 0 to 1/);
+    }
+  });
+});
+
 describe('riskTable and the report', () => {
   it('has a row for every make-up and size', () => {
     const rows = riskTable({ error: 0.2 });
