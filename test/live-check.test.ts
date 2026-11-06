@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CASE,
@@ -5,6 +8,7 @@ import {
   TRIAGE_ITEMS,
   hintFor,
   liveCheck,
+  loadDotEnv,
   main,
   renderLive,
   targetsFromEnv,
@@ -101,6 +105,59 @@ const ticking = (): (() => number) => {
   let t = 1_000;
   return () => (t += 250);
 };
+
+describe('reading a .env file', () => {
+  const failing = (code: string | undefined) => (): void => {
+    throw Object.assign(new Error(`${code ?? 'failed'}: SECRET-LINE-FROM-THE-FILE`), code === undefined ? {} : { code });
+  };
+
+  it('says it loaded', () => {
+    const seen: string[] = [];
+    expect(loadDotEnv('.env', (file) => void seen.push(file))).toBe('loaded');
+    expect(seen).toEqual(['.env']);
+  });
+
+  it('treats a missing file as fine', () => {
+    expect(loadDotEnv('.env', failing('ENOENT'))).toBe('missing');
+  });
+
+  it('reports a file it cannot read by its error code only', () => {
+    expect(loadDotEnv('.env', failing('EACCES'))).toBe('Could not read .env (EACCES); going on with the environment as it is.');
+    expect(loadDotEnv('.env', failing(undefined))).toBe('Could not read .env; going on with the environment as it is.');
+    expect(loadDotEnv('.env', () => {
+      throw 'a string';
+    })).toBe('Could not read .env; going on with the environment as it is.');
+    expect(loadDotEnv('.env', failing('EISDIR'))).not.toContain('SECRET');
+    expect(loadDotEnv('.env', () => {
+      throw null;
+    })).toContain('Could not read');
+  });
+
+  it('really reads a file, and variables already set win', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dotenv-'));
+    const fresh = 'GUARD_DOGS_TEST_FRESH';
+    const kept = 'GUARD_DOGS_TEST_KEPT';
+    try {
+      const file = path.join(dir, '.env');
+      fs.writeFileSync(file, `${fresh}=from-file\n${kept}=from-file\n`);
+      process.env[kept] = 'from-shell';
+      expect(loadDotEnv(file)).toBe('loaded');
+      expect(process.env[fresh]).toBe('from-file');
+      expect(process.env[kept]).toBe('from-shell');
+      expect(loadDotEnv(path.join(dir, 'nothing-here'))).toBe('missing');
+    } finally {
+      delete process.env[fresh];
+      delete process.env[kept];
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('is not left to a node flag: the npm script runs on node releases that lack --env-file-if-exists', () => {
+    const scripts = (JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { scripts: Record<string, string> }).scripts;
+    expect(scripts['live-check']).toBe('npm run build && node dist/examples/live-check.js');
+    expect(scripts['live-check']).not.toContain('--env-file');
+  });
+});
 
 describe('reading the environment', () => {
   it('checks nothing and says why when no key is set', () => {

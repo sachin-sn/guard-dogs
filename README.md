@@ -124,7 +124,7 @@ Nothing calls a model or the network. The guard dogs in the demo are scripted st
    GEMINI_API_KEY=...
    ```
 
-3. Run the check (needs Node 22.9 or newer for the `.env` file):
+3. Run the check (it reads `.env` itself; variables already set in your shell win):
 
    ```sh
    npm run live-check
