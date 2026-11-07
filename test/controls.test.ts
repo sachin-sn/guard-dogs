@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { PLAIN_REASON, controls } from '../eval/controls.js';
+import { CLIENT_WRITTEN, PLAIN_REASON, controls, marked } from '../eval/controls.js';
 import { corpus } from '../eval/corpus.js';
 import { runScenario } from '../eval/harness.js';
-import { checkScenario } from '../eval/scenario.js';
+import { checkScenario, type Scenario } from '../eval/scenario.js';
 import { score } from '../eval/score.js';
 import { oracle } from '../eval/sim.js';
 
@@ -66,5 +66,43 @@ describe('the controls', () => {
   it('give a plain reason that says nothing about a notice, and is not the one the simulated investigator writes', () => {
     expect(PLAIN_REASON).toBe('The upload came from this address.');
     expect(PLAIN_REASON).not.toMatch(/log says|notice|told|must/i);
+  });
+});
+
+describe('marking the events of a scenario', () => {
+  const referer = byId('injection-forgeable-target');
+  const filename = byId('injection-in-filename-forgeable-target');
+
+  it('lists the attributes the client writes, which are the address and the referer', () => {
+    expect(CLIENT_WRITTEN).toEqual(['client_ip', 'referer']);
+  });
+
+  it('tags each event with the names it has, and the file name is not among them', () => {
+    const tagged = marked(referer);
+    for (const event of tagged.events) {
+      expect(event.clientWritten).toEqual(CLIENT_WRITTEN.filter((name) => Object.hasOwn(event.attrs, name)));
+      expect(event.clientWritten).not.toContain('path');
+    }
+    expect(tagged.events.some((event) => (event.clientWritten ?? []).includes('referer'))).toBe(true);
+    // An event without a referer lists the address only: a name an event does not have is never listed.
+    const bare = marked(controls[0]?.scenario as Scenario);
+    for (const event of bare.events) expect(event.clientWritten).toEqual(['client_ip']);
+    expect(marked(filename).events.map((event) => event.clientWritten)).toEqual(filename.events.map(() => ['client_ip']));
+  });
+
+  it('takes the names it is given, and an empty list tags every event as having nothing client-written', () => {
+    expect(marked(referer, ['client_ip']).events.every((event) => (event.clientWritten ?? []).join() === 'client_ip')).toBe(true);
+    expect(marked(referer, []).events.every((event) => Array.isArray(event.clientWritten) && event.clientWritten.length === 0)).toBe(true);
+    expect(marked(referer, ['no_such_attr']).events.every((event) => (event.clientWritten ?? ['x']).length === 0)).toBe(true);
+  });
+
+  it('is the same scenario as its twin, apart from the tag, and still a valid one', () => {
+    for (const scenario of [referer, filename, ...controls.map((entry) => entry.scenario)]) {
+      const tagged = marked(scenario);
+      expect(checkScenario(tagged), scenario.id).toEqual([]);
+      expect({ ...tagged, events: tagged.events.map(({ clientWritten: _tag, ...rest }) => rest) }).toEqual(scenario);
+      // The original is not touched.
+      expect(scenario.events.some((event) => 'clientWritten' in event)).toBe(false);
+    }
   });
 });

@@ -304,6 +304,7 @@ async function run(scenario: Scenario, profile: ModelProfile, options: HarnessOp
       service: event.service,
       kind: event.kind,
       attrs: event.attrs,
+      ...(event.clientWritten === undefined ? {} : { clientWritten: event.clientWritten }),
     }));
     const { events, response } = await orchestrator.process(batch);
     for (const flagged of events.flagged) hits.push({ eventId: flagged.hit.eventId, ruleId: flagged.hit.ruleId, alert: flagged.alert });

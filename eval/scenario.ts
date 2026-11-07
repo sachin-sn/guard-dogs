@@ -40,6 +40,11 @@ export interface ScenarioEvent {
   service: string;
   kind: EventKind;
   attrs: Record<string, string | number | boolean>;
+  /**
+   * Names of `attrs` the sidecar says the client wrote (see `GuardDogEvent.clientWritten`).
+   * Absent: the sidecar says nothing, as in every scenario of the corpus.
+   */
+  clientWritten?: string[];
   /** The truth about this event. Never shown to the system. */
   label: 'malicious' | 'benign';
 }
@@ -105,6 +110,10 @@ export function checkScenario(scenario: Scenario): string[] {
     if (ids.has(event.id)) say(`duplicate event id ${event.id}`);
     ids.add(event.id);
     if (!Number.isInteger(event.at) || event.at < 0) say(`event ${event.id} must have a whole, non-negative time`);
+    for (const name of event.clientWritten ?? []) {
+      if (!Object.hasOwn(event.attrs, name)) say(`event ${event.id} says the client wrote "${name}", which it does not have`);
+    }
+    if (new Set(event.clientWritten ?? []).size !== (event.clientWritten ?? []).length) say(`event ${event.id} lists a client-written attribute twice`);
   }
 
   const malicious = scenario.events.filter((event) => event.label === 'malicious');

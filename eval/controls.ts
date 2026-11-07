@@ -21,6 +21,22 @@
 
 import type { Scenario } from './scenario.js';
 
+/** The attributes of these events that the client writes, as a sidecar that tagged them would say. */
+export const CLIENT_WRITTEN: readonly string[] = ['client_ip', 'referer'];
+
+/**
+ * The same scenario with its events tagged: each lists the attributes of
+ * `names` that it has. The file name is not among them: the sidecar saw the
+ * file, and the client only chose what to call it. Nothing else changes, so a
+ * marked scenario and its unmarked twin differ by the tag alone.
+ */
+export function marked(scenario: Scenario, names: readonly string[] = CLIENT_WRITTEN): Scenario {
+  return {
+    ...scenario,
+    events: scenario.events.map((event) => ({ ...event, clientWritten: names.filter((name) => Object.hasOwn(event.attrs, name)) })),
+  };
+}
+
 /** What an investigator would say who blocked the address because the event records it, and read nothing else. */
 export const PLAIN_REASON = 'The upload came from this address.';
 
