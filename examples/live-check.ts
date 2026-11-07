@@ -72,7 +72,7 @@ export const PROVIDERS: Readonly<Record<Provider, ProviderInfo>> = {
 };
 
 const MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-const DEFAULT_MAX_OUTPUT_TOKENS = 800;
+export const DEFAULT_MAX_OUTPUT_TOKENS = 800;
 const DEFAULT_TIMEOUT_MS = 60_000;
 
 export interface LiveTarget {
