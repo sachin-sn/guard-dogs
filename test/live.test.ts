@@ -5,12 +5,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_LIMITS,
   callCount,
+  callHealth,
   collectCases,
   failureFor,
   figures,
   inputsOf,
   makeups,
   measure,
+  mostlyFailed,
   plan,
   renderMeasured,
   renderPlan,
@@ -18,9 +20,11 @@ import {
   tallyTriage,
   tallyVotes,
   wilson,
+  type Clock,
   type Collected,
   type Inputs,
   type Participant,
+  type TriageRecord,
   type Plan,
   type VoteCase,
   type VoteRecord,
@@ -521,7 +525,107 @@ describe('measuring models', () => {
 
 // ---- counting ---------------------------------------------------------------------------------
 
+describe('pacing the calls', () => {
+  const chosen = plan(collected, { votes: 3, investigations: 2, triage: 3, runs: 2 });
+  /** A clock that only moves when something sleeps or the test moves it. */
+  function fakeClock(): { clock: Clock; sleeps: number[]; advance: (ms: number) => void; readonly time: number } {
+    let time = 1_000;
+    const sleeps: number[] = [];
+    return {
+      clock: { now: () => time, sleep: async (ms) => { sleeps.push(ms); time += ms; } },
+      sleeps,
+      advance: (ms) => { time += ms; },
+      get time() { return time; },
+    };
+  }
+
+  it('waits for the gap before every call but the first, for votes, investigations and triage alike', async () => {
+    const fake = fakeClock();
+    await measure([participant('claude-large', careful(chosen))], chosen, { minGapMs: 500, clock: fake.clock });
+    // 2 runs of 3 votes and 2 investigations: 10 calls, 9 waits.
+    expect(fake.sleeps).toEqual(Array(9).fill(500));
+
+    const small = fakeClock();
+    await measure([participant('gemini-small', careful(chosen))], chosen, { minGapMs: 250, clock: small.clock });
+    // 2 runs of 3 triage requests: 6 calls, 5 waits.
+    expect(small.sleeps).toEqual(Array(5).fill(250));
+  });
+
+  it('counts the gap from when a call started, so a slow call is not waited for twice', async () => {
+    const fake = fakeClock();
+    const right = careful(chosen);
+    const took = [400, 0, 1_000, 0, 0];
+    const slow = participant('claude-large', (request, ask) => {
+      fake.advance(took[ask.call - 1] as number);
+      return right(request, ask);
+    });
+    await measure([slow], { ...chosen, runs: 1 }, { minGapMs: 1_000, clock: fake.clock });
+    // Five calls. Call 1 takes 400 ms, so 600 are left before call 2; call 2 takes none, so a full 1,000 before call 3;
+    // call 3 takes the whole gap, so call 4 starts at once; call 4 takes none, so 1,000 before call 5.
+    expect(fake.sleeps).toEqual([600, 1_000, 1_000]);
+  });
+
+  it('does not touch the clock without a gap, and rejects a gap that is not a whole number of milliseconds', async () => {
+    const fake = fakeClock();
+    await measure([participant('claude-large', careful(chosen))], chosen, { clock: fake.clock });
+    await measure([participant('claude-large', careful(chosen))], chosen, { minGapMs: 0, clock: fake.clock });
+    expect(fake.sleeps).toEqual([]);
+    for (const bad of [-1, 1.5, Number.NaN]) {
+      await expect(measure([participant('claude-large', careful(chosen))], chosen, { minGapMs: bad, clock: fake.clock })).rejects.toThrow(/minGapMs must be a whole number, 0 or more/);
+    }
+  });
+
+  it('keeps the gap between the calls to each model, however the models interleave', async () => {
+    const fake = fakeClock();
+    const startedAt = new Map<string, number[]>();
+    const timed = (id: string): Participant => {
+      const right = careful(chosen);
+      return participant(id, (request, ask) => {
+        startedAt.set(id, [...(startedAt.get(id) ?? []), fake.time]);
+        return right(request, ask);
+      });
+    };
+    await measure([timed('claude-large'), timed('gemini-large')], { ...chosen, investigations: [], runs: 1 }, { minGapMs: 100, clock: fake.clock });
+    for (const [id, times] of startedAt) {
+      expect(times, id).toHaveLength(3);
+      for (let i = 1; i < times.length; i++) expect((times[i] as number) - (times[i - 1] as number), id).toBeGreaterThanOrEqual(100);
+    }
+    // No wait is longer than the gap: one model's waiting is not added to another's.
+    expect(Math.max(...fake.sleeps)).toBeLessThanOrEqual(100);
+  });
+});
+
 describe('counting', () => {
+  it('counts calls that got no answer by kind, and a triage request about several items as one call', () => {
+    const who = { family: 'gemini', model: 'gemini-small' };
+    const triage = (run: number, caseId: string, itemId: string, failure?: string): TriageRecord => ({ ...who, run, caseId, itemId, expected: 'routine', outcome: failure === undefined ? 'routine' : 'failed', ...(failure === undefined ? {} : { failure }) });
+    const measured = {
+      votes: [
+        { ...who, model: 'gemini-large', run: 1, caseId: 'a', label: 'good' as const, outcome: 'failed' as const, failure: 'http 429' },
+        { ...who, model: 'gemini-large', run: 1, caseId: 'b', label: 'bad' as const, outcome: 'reject' as const },
+      ],
+      // The same case name as a vote above: a vote and an investigation are two calls.
+      investigations: [{ ...who, model: 'gemini-large', run: 1, caseId: 'a', category: 'attack' as const, outcome: 'failed' as const, failure: 'network' }],
+      triage: [triage(1, 't1', 'x', 'http 429'), triage(1, 't1', 'y', 'http 429'), triage(1, 't1', 'z', 'http 429'), triage(1, 't2', 'x'), triage(2, 't1', 'x', 'http 503')],
+    };
+    expect(callHealth(measured, 'gemini-small')).toMatchObject({ calls: 3, failed: 2 });
+    expect([...callHealth(measured, 'gemini-small').kinds]).toEqual([['http 429', 1], ['http 503', 1]]);
+    expect(callHealth(measured, 'gemini-large')).toMatchObject({ calls: 3, failed: 2 });
+    expect(new Map(callHealth(measured, 'gemini-large').kinds)).toEqual(new Map([['http 429', 1], ['network', 1]]));
+    expect(callHealth(measured, 'nobody')).toMatchObject({ calls: 0, failed: 0 });
+    // The same case and run asked of two models is two calls, one for each; the same case in two runs is two calls.
+    expect(callHealth({ ...measured, votes: [...measured.votes, { ...measured.votes[0] as VoteRecord, model: 'claude-large' }] }, 'gemini-large').calls).toBe(3);
+  });
+
+  it('calls a model mostly failed only when more than half its calls failed', () => {
+    const health = (failed: number, calls: number) => ({ calls, failed, kinds: new Map<string, number>() });
+    expect(mostlyFailed(health(0, 0))).toBe(false);
+    expect(mostlyFailed(health(2, 4))).toBe(false);
+    expect(mostlyFailed(health(3, 5))).toBe(true);
+    expect(mostlyFailed(health(5, 10))).toBe(false);
+    expect(mostlyFailed(health(6, 10))).toBe(true);
+  });
+
   it('gives the Wilson interval for a share, which does not shrink to nothing at 0 or all', () => {
     expect(wilson({ x: 0, n: 16 }).low).toBe(0);
     expect(wilson({ x: 0, n: 16 }).high).toBeCloseTo(3.8416 / (16 + 3.8416), 4);
@@ -694,6 +798,103 @@ describe('counting', () => {
 describe('the report', () => {
   const chosen = plan(collected, { votes: 6, investigations: 2, triage: 2, runs: 2 });
 
+  describe('when calls got no answer', () => {
+    const failing = (kind: 'http' | 'network', status?: number): Answer => () => {
+      throw new ModelError(kind, 'the provider said something quotable', status);
+    };
+    const render = async (all: Participant[]): Promise<string> => renderMeasured(await measure(all, chosen), chosen, all).join('\n');
+
+    it('says nothing about failures when there were none', async () => {
+      const all = [participant('claude-large', careful(chosen)), participant('claude-small', careful(chosen))];
+      expect(await render(all)).not.toContain('CALLS THAT GOT NO ANSWER');
+    });
+
+    it('shows the kinds for each model, says which model failed on most calls, and what to do about each kind', async () => {
+      const all = [
+        participant('claude-large', careful(chosen)),
+        participant('gemini-large', failing('http', 429)),
+        participant('claude-small', careful(chosen)),
+        participant('gemini-small', failing('network')),
+      ];
+      const text = await render(all);
+      const lines = text.split('\n');
+      // 2 runs of 6 votes and 2 investigations; 2 runs of 2 triage requests.
+      expect(lines).toContain('  gemini-large   16 of 16 calls: http 429 x16');
+      expect(lines).toContain('  gemini-small   4 of 4 calls: network x4');
+      expect(lines).toContain('  gemini-large failed on most of its calls, so its rows above describe that, not the model.');
+      expect(lines).toContain('  gemini-small failed on most of its calls, so its rows above describe that, not the model.');
+      expect(text).toContain('--min-gap-ms');
+      expect(text).toContain('--timeout-ms 120000');
+      expect(text).not.toContain('quotable');
+      expect(lines.filter((line) => line.startsWith('  claude-') && line.includes('failed on most'))).toEqual([]);
+      expect(lines.filter((line) => /^ {2}claude-(large|small) +\d+ of \d+ calls:/.test(line))).toEqual([]);
+    });
+
+    it('leaves a failing family out of the tables, and says so, and keeps the family that answered', async () => {
+      const all = [participant('claude-large', careful(chosen)), participant('gemini-large', failing('http', 429))];
+      const text = await render(all);
+      expect(text).toContain('Left out of the tables below: gemini, because its large model failed on most calls. The independence check and the pair panels need two families that both answered: fix that and run both again.');
+      expect(text).toContain('claude only');
+      expect(text).not.toContain('gemini only');
+      expect(text).not.toContain('claude + gemini');
+      expect(text).not.toContain('INDEPENDENCE');
+      expect(text.split('\n').filter((line) => /^ {2}gemini +(bad|good) /.test(line))).toEqual([]);
+      expect(text.split('\n').filter((line) => /^ {2}claude +(bad|good) /.test(line))).toHaveLength(2);
+    });
+
+    it('has no table at all when every family failed, and says why', async () => {
+      const all = [participant('claude-large', failing('http', 503)), participant('gemini-large', failing('http', 429))];
+      const text = await render(all);
+      expect(text).toContain('Left out of the tables below: claude, gemini, because their large models failed on most calls. Nothing is left to tabulate.');
+      expect(text).not.toContain('PANELS');
+      expect(text).not.toContain('WHAT THE RISK MODEL GETS');
+      expect(text).not.toContain('INDEPENDENCE');
+    });
+
+    it('keeps a model in the tables when some of its calls failed but fewer than half', async () => {
+      const right = careful(chosen);
+      const flaky = participant('gemini-large', (request, ask) => {
+        if (ask.call <= 4) throw new ModelError('http', 'busy', 503);
+        return right(request, ask);
+      });
+      const text = await render([participant('claude-large', right), flaky]);
+      expect(text.split('\n')).toContain('  gemini-large   4 of 16 calls: http 503 x4');
+      expect(text).not.toContain('failed on most');
+      expect(text).not.toContain('Left out of the tables');
+      expect(text).toContain('gemini only');
+      expect(text).toContain('INDEPENDENCE.');
+    });
+
+    it('lists the kinds of failure from the most common to the least, and alphabetically among equals', async () => {
+      const right = careful(chosen);
+      const answering = (statuses: number[]): Participant =>
+        participant('gemini-large', (request, ask) => {
+          const status = statuses[ask.call - 1];
+          if (status !== undefined) throw new ModelError('http', 'busy', status);
+          return right(request, ask);
+        });
+      expect((await render([answering([503, 503, 503, 429])])).split('\n')).toContain('  gemini-large   4 of 16 calls: http 503 x3, http 429 x1');
+      expect((await render([answering([503, 503, 429, 429])])).split('\n')).toContain('  gemini-large   4 of 16 calls: http 429 x2, http 503 x2');
+    });
+
+    it('does not suggest pacing for a failure that pacing cannot help', async () => {
+      const text = await render([participant('claude-large', failing('http', 503))]);
+      expect(text).not.toContain('--min-gap-ms');
+      expect(text).not.toContain('--timeout-ms');
+      expect(text).not.toContain('--max-output-tokens');
+    });
+
+    it('says what an unfinished answer and a refusal usually mean, and only when they happened', async () => {
+      const output = await render([participant('claude-large', failing('output' as 'http'))]);
+      expect(output).toContain('--max-output-tokens 4096');
+      expect(output).not.toContain('declined or blocked');
+      const refused = await render([participant('claude-large', failing('refused' as 'http'))]);
+      expect(refused).toContain('refused: the provider declined or blocked the request.');
+      expect(refused).not.toContain('--max-output-tokens');
+      expect(refused.split('\n')).toContain('  claude-large   16 of 16 calls: refused x16');
+    });
+  });
+
   it('says what will be sent', () => {
     const all = [participant('claude-small', careful(chosen)), participant('claude-large', careful(chosen)), participant('gemini-small', careful(chosen)), participant('gemini-large', careful(chosen))];
     const lines = renderPlan(chosen, all);
@@ -701,6 +902,11 @@ describe('the report', () => {
     expect(lines.join('\n')).toContain('6 cases (3 good proposals, 3 bad ones)');
     expect(lines.join('\n')).toContain('each case is asked 2 times');
     expect(lines.at(-1)).toBe(`  calls to send:  ${callCount(chosen, 2, 2)}`);
+    // Without the names the provider knows the models by, there is no line for them.
+    expect(lines.join('\n')).not.toContain('model names:');
+    const named = all.map((entry, index) => ({ ...entry, api: ['haiku-x', 'sonnet-x', 'flash-lite-x', 'flash-x'][index] as string }));
+    expect(renderPlan(chosen, named).join('\n')).toContain('  model names:    claude-small = haiku-x, claude-large = sonnet-x, gemini-small = flash-lite-x, gemini-large = flash-x');
+    expect(renderPlan(chosen, [{ ...all[1] as Participant, api: 'sonnet-x' }, all[3] as Participant]).join('\n')).toContain('claude-large = sonnet-x, gemini-large = unknown');
     expect(renderPlan({ ...chosen, runs: 1 }, all).join('\n')).toContain('each case is asked 1 time\n');
     const lopsided = [participant('claude-large', careful(chosen)), participant('gemini-large', careful(chosen)), participant('claude-small', careful(chosen))];
     expect(renderPlan(chosen, lopsided).at(-1)).toBe(`  calls to send:  ${chosen.runs * (2 * (chosen.votes.length + chosen.investigations.length) + chosen.triage.length)}`);
@@ -865,11 +1071,13 @@ describe('npm run profile', () => {
   const json = (value: unknown, init: ResponseInit = {}): Response => new Response(JSON.stringify(value), { status: 200, headers: { 'content-type': 'application/json' }, ...init });
 
   /** A fetch that answers like the two providers: approve when the target is in the evidence, propose the first thing offered, escalate everything. */
-  function provider(status = 200): { fetch: typeof fetch; urls: string[]; bodies: string[] } {
+  function provider(status = 200): { fetch: typeof fetch; urls: string[]; bodies: string[]; times: number[] } {
     const urls: string[] = [];
     const bodies: string[] = [];
+    const times: number[] = [];
     const impl = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
       urls.push(String(url));
+      times.push(Date.now());
       bodies.push(String(init?.body));
       if (status !== 200) return json({ error: { message: 'quoted request' } }, { status });
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -888,7 +1096,7 @@ describe('npm run profile', () => {
       }
       return gemini ? json({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text }] } }] }) : json({ stop_reason: 'end_turn', content: [{ type: 'text', text }] });
     };
-    return { fetch: impl as typeof fetch, urls, bodies };
+    return { fetch: impl as typeof fetch, urls, bodies, times };
   }
 
   async function run(args: string[], env: Record<string, string | undefined>, fake = provider()): Promise<{ code: number; lines: string[]; fake: ReturnType<typeof provider> }> {
@@ -904,6 +1112,7 @@ describe('npm run profile', () => {
     const text = lines.join('\n');
     expect(text).toContain('models: claude-small (small), claude-large (large), gemini-small (small), gemini-large (large)');
     expect(text).toContain('calls to send:  204');
+    expect(text).toContain('model names:    claude-small = claude-haiku-5-5, claude-large = claude-sonnet-5-5, gemini-small = ');
     expect(text).toContain('Nothing was sent. Add --run to send these calls.');
   });
 
@@ -977,6 +1186,10 @@ describe('npm run profile', () => {
 
     const written = JSON.parse(fs.readFileSync(out, 'utf8')) as Record<string, unknown>;
     expect(written['limits']).toEqual({ votes: 2, investigations: 1, triage: 1, runs: 1 });
+    expect(written['models']).toEqual([
+      { name: 'claude-small', family: 'claude', tier: 'small', api: 'claude-haiku-5-5' },
+      { name: 'claude-large', family: 'claude', tier: 'large', api: 'claude-sonnet-5-5' },
+    ]);
     expect(written['calls']).toBe(4);
     expect(asArray(written['votes'])).toHaveLength(2);
     expect(asArray(written['investigations'])).toHaveLength(1);
@@ -1014,6 +1227,42 @@ describe('npm run profile', () => {
     expect(text).not.toContain('quoted request');
   });
 
+  it('says how long --min-gap-ms makes the slowest model take, and says nothing without it', async () => {
+    const paced = await run(['--min-gap-ms', '15000'], BOTH);
+    // 3 runs of 16 votes and 8 investigations on a large model: 72 calls.
+    expect(paced.lines.join('\n')).toContain("  pacing:         at least 15000 ms between one model's calls, so the slowest model takes at least 18 minutes");
+    expect(paced.fake.urls).toEqual([]);
+    // With no votes and no investigations, the longest queue is a small model's 10 triage requests, 3 times.
+    const triageOnly = await run(['--min-gap-ms', '15000', '--votes', '0', '--investigations', '0'], BOTH);
+    expect(triageOnly.lines.join('\n')).toContain('so the slowest model takes at least 8 minutes');
+    // 30 requests at 14.2 seconds is 7.1 minutes: rounded up, not to the nearest.
+    expect((await run(['--min-gap-ms', '14200', '--votes', '0', '--investigations', '0'], BOTH)).lines.join('\n')).toContain('takes at least 8 minutes');
+    for (const args of [[], ['--min-gap-ms', '0']]) expect((await run(args, BOTH)).lines.join('\n')).not.toContain('pacing:');
+  });
+
+  it('spaces the calls to each model by --min-gap-ms', async () => {
+    const { code, fake } = await run(['--run', '--only', 'anthropic', '--runs', '1', '--votes', '3', '--investigations', '0', '--triage', '0', '--min-gap-ms', '80'], BOTH);
+    expect(code).toBe(0);
+    expect(fake.times).toHaveLength(3);
+    // A little slack for timers that fire early by a millisecond or two.
+    expect(fake.times[1] as number - (fake.times[0] as number)).toBeGreaterThanOrEqual(70);
+    expect(fake.times[2] as number - (fake.times[1] as number)).toBeGreaterThanOrEqual(70);
+    const unpaced = await run(['--run', '--only', 'anthropic', '--runs', '1', '--votes', '3', '--investigations', '0', '--triage', '0'], BOTH);
+    expect(unpaced.fake.times[2] as number - (unpaced.fake.times[0] as number)).toBeLessThan(70);
+  });
+
+  it('shows a rate limit as such, leaves the family out, and points at --min-gap-ms', async () => {
+    const { code, lines } = await run(['--run', '--votes', '2', '--investigations', '1', '--triage', '1', '--runs', '1', '--only', 'gemini'], BOTH, provider(429));
+    expect(code).toBe(1);
+    const text = lines.join('\n');
+    expect(text).toContain('  gemini-large   3 of 3 calls: http 429 x3');
+    expect(text).toContain('  gemini-small   1 of 1 call: http 429 x1');
+    expect(text).toContain('--min-gap-ms');
+    expect(text).toContain('Nothing is left to tabulate.');
+    expect(text).toContain('4 calls got no usable answer (by kind, above)');
+    expect(text).not.toContain('quoted request');
+  });
+
   it('refuses options that make no sense', async () => {
     await expect(run(['--runs', '0'], BOTH)).rejects.toThrow(/--runs needs a whole number, 1 or more/);
     await expect(run(['--runs', '11'], BOTH)).rejects.toThrow(/--runs is at most 10/);
@@ -1024,5 +1273,9 @@ describe('npm run profile', () => {
     await expect(run(['--json'], BOTH)).rejects.toThrow(/--json needs a file name/);
     await expect(run(['--json', '--run'], BOTH)).rejects.toThrow(/--json needs a file name/);
     await expect(run(['--votes'], BOTH)).rejects.toThrow(/--votes needs a whole number/);
+    await expect(run(['--min-gap-ms', '-1'], BOTH)).rejects.toThrow(/--min-gap-ms needs a whole number, 0 or more/);
+    await expect(run(['--min-gap-ms', 'soon'], BOTH)).rejects.toThrow(/--min-gap-ms needs a whole number/);
+    await expect(run(['--min-gap-ms', '300001'], BOTH)).rejects.toThrow(/--min-gap-ms is at most 300000/);
+    expect((await run(['--min-gap-ms', '300000'], BOTH)).code).toBe(0);
   });
 });
