@@ -93,11 +93,22 @@ export function readAnswer(protocol: ModelProtocol, json: unknown): string {
   }
 }
 
+/**
+ * The provider's finish reason, if it is a plain code. A reason is a word such as
+ * `MAX_TOKENS` or `max_tokens`; anything longer or odder could carry text from
+ * the answer, so it is not kept.
+ */
+function finishDetail(reason: unknown): string {
+  return `finish ${typeof reason === 'string' && /^[A-Za-z][A-Za-z0-9_-]{0,31}$/.test(reason) ? reason : 'unknown'}`;
+}
+
+const NO_TEXT = 'no text';
+
 function readAnthropic(json: Obj): string {
   const stop = json['stop_reason'];
   if (stop === 'refusal') throw new ModelError('refused', 'the model declined to answer');
   if (stop !== 'end_turn' && stop !== 'stop_sequence') {
-    throw new ModelError('output', 'the model did not finish its answer');
+    throw new ModelError('output', 'the model did not finish its answer', undefined, finishDetail(stop));
   }
   const content = json['content'];
   if (!Array.isArray(content)) throw new ModelError('response', 'the answer has no content');
@@ -105,7 +116,7 @@ function readAnthropic(json: Obj): string {
     .filter((block): block is Obj => isObj(block) && block['type'] === 'text' && typeof block['text'] === 'string')
     .map((block) => block['text'] as string)
     .join('');
-  if (text.length === 0) throw new ModelError('output', 'the model wrote no text');
+  if (text.length === 0) throw new ModelError('output', 'the model wrote no text', undefined, NO_TEXT);
   return text;
 }
 
@@ -123,7 +134,7 @@ function readGemini(json: Obj): string {
   if (typeof finish === 'string' && GEMINI_DECLINED.has(finish)) {
     throw new ModelError('refused', 'the provider declined to answer');
   }
-  if (finish !== 'STOP') throw new ModelError('output', 'the model did not finish its answer');
+  if (finish !== 'STOP') throw new ModelError('output', 'the model did not finish its answer', undefined, finishDetail(finish));
   const content = first['content'];
   const parts: unknown = isObj(content) ? content['parts'] : undefined;
   if (!Array.isArray(parts)) throw new ModelError('response', 'the candidate has no parts');
@@ -132,7 +143,7 @@ function readGemini(json: Obj): string {
     .filter((part): part is Obj => isObj(part) && typeof part['text'] === 'string' && part['thought'] !== true)
     .map((part) => part['text'] as string)
     .join('');
-  if (text.length === 0) throw new ModelError('output', 'the model wrote no text');
+  if (text.length === 0) throw new ModelError('output', 'the model wrote no text', undefined, NO_TEXT);
   return text;
 }
 
@@ -147,8 +158,8 @@ function readOpenAi(json: Obj): string {
   if (typeof message['refusal'] === 'string' && message['refusal'].length > 0) {
     throw new ModelError('refused', 'the model declined to answer');
   }
-  if (finish !== 'stop') throw new ModelError('output', 'the model did not finish its answer');
+  if (finish !== 'stop') throw new ModelError('output', 'the model did not finish its answer', undefined, finishDetail(finish));
   const content = message['content'];
-  if (typeof content !== 'string' || content.length === 0) throw new ModelError('output', 'the model wrote no text');
+  if (typeof content !== 'string' || content.length === 0) throw new ModelError('output', 'the model wrote no text', undefined, NO_TEXT);
   return content;
 }

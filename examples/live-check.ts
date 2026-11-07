@@ -240,7 +240,7 @@ export interface LiveOptions {
 }
 
 interface Trace {
-  error?: { kind: string; status?: number };
+  error?: Failure;
   reply?: string;
 }
 
@@ -255,15 +255,26 @@ function traced(client: ModelClient, trace: Trace): ModelClient {
         trace.reply = reply;
         return reply;
       } catch (error) {
-        if (error instanceof ModelError) trace.error = { kind: error.kind, ...(error.status === undefined ? {} : { status: error.status }) };
+        if (error instanceof ModelError) trace.error = failureOf(error);
         throw error;
       }
     },
   };
 }
 
+/** What a hint is made from: the kind of failure, and the HTTP status or finish reason when there is one. */
+export interface Failure {
+  kind: string;
+  status?: number;
+  detail?: string;
+}
+
+function failureOf(error: ModelError): Failure {
+  return { kind: error.kind, ...(error.status === undefined ? {} : { status: error.status }), ...(error.detail === undefined ? {} : { detail: error.detail }) };
+}
+
 /** What to try next, from the kind of failure alone. */
-export function hintFor(error: { kind: string; status?: number }, host: string): string {
+export function hintFor(error: Failure, host: string): string {
   switch (error.kind) {
     case 'config':
       return 'the key is missing, empty or has characters a header cannot hold (a trailing space or newline is the usual cause)';
@@ -280,8 +291,13 @@ export function hintFor(error: { kind: string; status?: number }, host: string):
       return `no answer; check the connection, any proxy, and that this machine may reach ${host}`;
     case 'refused':
       return 'the provider declined to answer the made-up case';
-    case 'output':
-      return 'no usable answer: it may have been cut off (raise --max-output-tokens) or may not be a single JSON object';
+    case 'output': {
+      const detail = error.detail;
+      if (detail !== undefined && /^finish (MAX_TOKENS|max_tokens|length)$/.test(detail)) return `the answer hit the output limit (${detail}): raise --max-output-tokens`;
+      if (detail?.startsWith('finish ') === true) return `the provider stopped the answer early (${detail}), not at the output limit, so --max-output-tokens will not help`;
+      if (detail === 'no text') return 'the model finished without writing an answer';
+      return 'the model finished, but what it wrote was not a single JSON object';
+    }
     case 'response':
       return 'the provider answered in a form the adapter does not read';
     default:
@@ -319,7 +335,7 @@ export async function liveCheck(targets: readonly LiveTarget[], options: LiveOpt
         const verdict = await run(AbortSignal.timeout(timeoutMs));
         result = { target: target.name, check, worked: true, expected: verdict.expected, detail: verdict.detail, ms: now() - started };
       } catch (error) {
-        const failure = trace.error ?? (error instanceof ModelError ? { kind: error.kind, ...(error.status === undefined ? {} : { status: error.status }) } : undefined);
+        const failure = trace.error ?? (error instanceof ModelError ? failureOf(error) : undefined);
         const detail =
           failure !== undefined
             ? hintFor(failure, target.client.model.host)

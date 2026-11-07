@@ -34,7 +34,7 @@ import { panelRisk, seatsFor } from '../eval/risk.js';
 import type { Scenario } from '../eval/scenario.js';
 import { block } from '../eval/sim.js';
 import { main } from '../examples/profile.js';
-import { ModelError, buildVotePrompt, createModelRegistry, type ModelClient, type ModelRequest } from '../src/index.js';
+import { ModelError, buildVotePrompt, createModelRegistry, type ModelClient, type ModelErrorKind, type ModelRequest } from '../src/index.js';
 
 const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
 const asRecord = (value: unknown): Record<string, unknown> => (typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {});
@@ -918,8 +918,8 @@ describe('the report', () => {
   });
 
   describe('when calls got no answer', () => {
-    const failing = (kind: 'http' | 'network', status?: number): Answer => () => {
-      throw new ModelError(kind, 'the provider said something quotable', status);
+    const failing = (kind: ModelErrorKind, status?: number, detail?: string): Answer => () => {
+      throw new ModelError(kind, 'the provider said something quotable', status, detail);
     };
     const render = async (all: Participant[]): Promise<string> => renderMeasured(await measure(all, chosen), chosen, all).join('\n');
 
@@ -1003,14 +1003,73 @@ describe('the report', () => {
       expect(text).not.toContain('--max-output-tokens');
     });
 
-    it('says what an unfinished answer and a refusal usually mean, and only when they happened', async () => {
-      const output = await render([participant('claude-large', failing('output' as 'http'))]);
-      expect(output).toContain('--max-output-tokens 4096');
-      expect(output).not.toContain('declined or blocked');
-      const refused = await render([participant('claude-large', failing('refused' as 'http'))]);
+    it('says what a refusal means, and only when it happened', async () => {
+      const refused = await render([participant('claude-large', failing('refused'))]);
       expect(refused).toContain('refused: the provider declined or blocked the request.');
       expect(refused).not.toContain('--max-output-tokens');
       expect(refused.split('\n')).toContain('  claude-large   16 of 16 calls: refused x16');
+      expect(refused).not.toContain('output finish');
+    });
+
+    it('names the finish reason of an answer that stopped, and suggests a larger limit only when the limit was the cause', async () => {
+      for (const reason of ['MAX_TOKENS', 'max_tokens', 'length']) {
+        const text = await render([participant('gemini-large', failing('output', undefined, `finish ${reason}`))]);
+        expect(text.split('\n')).toContain(`  gemini-large   16 of 16 calls: output finish ${reason} x16`);
+        expect(text).toContain('output finish MAX_TOKENS (max_tokens, length): the answer hit the output limit');
+        expect(text).toContain('try --max-output-tokens 4096.');
+        expect(text).not.toContain('a reason other than the output limit');
+        expect(text).not.toContain('declined or blocked');
+      }
+    });
+
+    it('says a larger limit will not help when the provider stopped the answer for another reason', async () => {
+      // Near misses of the limit's own reasons are other reasons.
+      for (const reason of ['OTHER', 'MAX_TOKENS2', 'max', 'length_', 'unknown']) {
+        const text = await render([participant('gemini-large', failing('output', undefined, `finish ${reason}`))]);
+        expect(text.split('\n')).toContain(`  gemini-large   16 of 16 calls: output finish ${reason} x16`);
+        expect(text).toContain(`  output finish ${reason}: the provider stopped the answer for a reason other than the output limit, so a larger --max-output-tokens will not help.`);
+        expect(text).not.toContain('try --max-output-tokens 4096');
+        expect(text).not.toContain('hit the output limit');
+      }
+    });
+
+    it('gives each kind of stop its own advice when a model fails in several ways', async () => {
+      const mixed = participant('gemini-large', (request, ask) => {
+        const failures: Record<number, ModelError> = {
+          1: new ModelError('output', 'x', undefined, 'finish MAX_TOKENS'),
+          2: new ModelError('output', 'x', undefined, 'finish OTHER'),
+          3: new ModelError('output', 'x', undefined, 'finish OTHER'),
+          4: new ModelError('output', 'x', undefined, 'finish RECITE'),
+          5: new ModelError('output', 'x', undefined, 'no text'),
+          6: new ModelError('output', 'x'),
+        };
+        const error = failures[ask.call];
+        if (error !== undefined) throw error;
+        return careful(chosen)(request, ask);
+      });
+      const text = await render([mixed]);
+      expect(text.split('\n')).toContain('  gemini-large   6 of 16 calls: output finish OTHER x2, output x1, output finish MAX_TOKENS x1, output finish RECITE x1, output no text x1');
+      expect(text).toContain('try --max-output-tokens 4096.');
+      expect(text).toContain('  output finish OTHER, output finish RECITE: the provider stopped the answer for a reason other than the output limit, so a larger --max-output-tokens will not help.');
+      expect(text).toContain('  output no text: the model finished without writing an answer.');
+      expect(text).toContain('  output: the model finished, but what it wrote was not the one JSON object that was asked for. A larger output limit will not help.');
+    });
+
+    it('says an answer that was finished but unreadable is not a limit problem', async () => {
+      const text = await render([participant('claude-large', failing('output'))]);
+      expect(text.split('\n')).toContain('  claude-large   16 of 16 calls: output x16');
+      expect(text).toContain('  output: the model finished, but what it wrote was not the one JSON object that was asked for. A larger output limit will not help.');
+      expect(text).not.toContain('try --max-output-tokens 4096');
+      expect(text).not.toContain('output no text:');
+      expect(text).not.toContain('a reason other than');
+    });
+
+    it('says an answer with no text is not a limit problem either', async () => {
+      const text = await render([participant('claude-large', failing('output', undefined, 'no text'))]);
+      expect(text.split('\n')).toContain('  claude-large   16 of 16 calls: output no text x16');
+      expect(text).toContain('  output no text: the model finished without writing an answer.');
+      expect(text).not.toContain('try --max-output-tokens 4096');
+      expect(text).not.toContain('output: the model finished, but what it wrote');
     });
   });
 
@@ -1380,6 +1439,23 @@ describe('npm run profile', () => {
     expect(text).toContain('Nothing is left to tabulate.');
     expect(text).toContain('4 calls got no usable answer (by kind, above)');
     expect(text).not.toContain('quoted request');
+  });
+
+  it('shows an answer cut off at the output limit as such, with the provider\'s finish reason and none of what it wrote', async () => {
+    const cutOff = (finishReason: string): typeof fetch =>
+      (async () => json({ candidates: [{ finishReason, content: { parts: [{ text: '{"decision":"approve","rationale":"PARTIAL-ANSWER-TEXT' }] } }] })) as typeof fetch;
+    const args = ['--run', '--votes', '2', '--investigations', '1', '--triage', '1', '--runs', '1', '--only', 'gemini'];
+    const limited = await run(args, BOTH, { ...provider(), fetch: cutOff('MAX_TOKENS') });
+    expect(limited.code).toBe(1);
+    const text = limited.lines.join('\n');
+    expect(text).toContain('  gemini-large   3 of 3 calls: output finish MAX_TOKENS x3');
+    expect(text).toContain('  gemini-small   1 of 1 call: output finish MAX_TOKENS x1');
+    expect(text).toContain('try --max-output-tokens 4096.');
+    expect(text).not.toContain('PARTIAL-ANSWER-TEXT');
+    // Another reason is shown as it is, and a larger limit is not suggested for it.
+    const other = (await run(args, BOTH, { ...provider(), fetch: cutOff('OTHER') })).lines.join('\n');
+    expect(other).toContain('  gemini-large   3 of 3 calls: output finish OTHER x3');
+    expect(other).not.toContain('try --max-output-tokens 4096');
   });
 
   it('refuses options that make no sense', async () => {
