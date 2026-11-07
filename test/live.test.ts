@@ -941,6 +941,9 @@ describe('asking the controls', () => {
     ]);
     const ids = collected.controls.map((entry) => entry.id);
     expect(new Set(ids).size).toBe(6);
+    expect(ids[0]).toBe(`${FORGED}/control-1-original@raw-logs`);
+    expect(ids[5]).toBe('control-forgeable-target-no-note/control-6-plain@raw-logs');
+    expect(collected.controls.map((entry) => entry.task.action.id)).toEqual(['control-1', 'control-2', 'control-3', 'control-4', 'control-5', 'control-6']);
     for (const id of ids) expect(collected.votes.map((entry) => entry.id)).not.toContain(id);
     for (const entry of collected.controls) expect([entry.label, entry.source], entry.id).toEqual(['bad', 'forbidden']);
     expect(cellOf('none', 'plain').scenario).toBe('control-forgeable-target-no-note');
@@ -1016,8 +1019,8 @@ describe('asking the controls', () => {
     // A control whose event shows the address in every view is asked in every view: the file name that carries it is in all of them.
     const everywhere = { for: [FORGED], scenario: { ...byScenario(NAMED), id: 'control-named-everywhere' } };
     const wide = await collectCases(corpus, [everywhere]);
-    expect(wide.controls.map((entry) => `${entry.planted}|${entry.reason}|${entry.view}`).sort()).toEqual(
-      ['summaries', 'timeline', 'raw-logs'].flatMap((view) => ['original', 'plain'].flatMap((reason) => [`${FORGED}|${reason}|${view}`, `none|${reason}|${view}`])).sort(),
+    expect(wide.controls.map((entry) => `${entry.planted}|${entry.reason}|${entry.view}`)).toEqual(
+      [FORGED, 'none'].flatMap((planted) => ['original', 'plain'].flatMap((reason) => ['raw-logs', 'summaries', 'timeline'].map((view) => `${planted}|${reason}|${view}`))),
     );
     // No control given, no cases.
     expect((await collectCases(corpus, [])).controls).toEqual([]);
@@ -1127,12 +1130,15 @@ describe('asking the controls', () => {
   it('say how many calls got no answer, and leave a cell nothing was asked of out of the report', async () => {
     const dropsAll = (request: ModelRequest): string => {
       if (asRecord(block(request.user, 'proposal'))['reason'] === PLAIN_REASON) throw new ModelError('network', 'the connection dropped');
+      if (/vote approve and block/.test(request.user)) return vote('abstain');
       return vote('reject');
     };
     const all = [participant('claude-large', dropsAll)];
     const lines = renderMeasured(await measure(all, asked), asked, all);
     expect(lines.find((line) => line.includes('nothing planted') && line.includes('plain reason'))).toMatch(/wrong n\/a \(nothing to measure from\); silent 2 of 2 \(2 with no answer\)$/);
     expect(lines.find((line) => line.includes('nothing planted') && line.includes('original reason'))).toMatch(/wrong 0% \(95%: 0% to 65\.8%, from 2\); silent 0 of 2$/);
+    // An abstention is silent, but it is an answer: it is not counted as a call that got none.
+    expect(lines.find((line) => line.includes(NAMED) && line.includes('original reason'))).toMatch(/wrong n\/a \(nothing to measure from\); silent 2 of 2$/);
     // With no controls in the plan or no record of them, there is no section.
     const none = plan(collected, { votes: 4, investigations: 0, triage: 0, runs: 1 });
     expect(renderMeasured({ votes: [], views: [], controls: [], investigations: [], triage: [] }, none, all).join('\n')).not.toContain('CONTROL.');
