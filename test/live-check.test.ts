@@ -286,7 +286,14 @@ describe('what to try when a call fails', () => {
     expect(hintFor({ kind: 'http' }, host)).toBe('HTTP ?');
     expect(hintFor({ kind: 'network' }, host)).toContain(host);
     expect(hintFor({ kind: 'refused' }, host)).toMatch(/declined/);
-    expect(hintFor({ kind: 'output' }, host)).toMatch(/cut off.*--max-output-tokens/);
+    expect(hintFor({ kind: 'output' }, host)).toBe('the model finished, but what it wrote was not a single JSON object');
+    for (const reason of ['MAX_TOKENS', 'max_tokens', 'length']) {
+      expect(hintFor({ kind: 'output', detail: `finish ${reason}` }, host)).toBe(`the answer hit the output limit (finish ${reason}): raise --max-output-tokens`);
+    }
+    for (const reason of ['OTHER', 'MAX_TOKENS2', 'max', 'unknown']) {
+      expect(hintFor({ kind: 'output', detail: `finish ${reason}` }, host)).toBe(`the provider stopped the answer early (finish ${reason}), not at the output limit, so --max-output-tokens will not help`);
+    }
+    expect(hintFor({ kind: 'output', detail: 'no text' }, host)).toBe('the model finished without writing an answer');
     expect(hintFor({ kind: 'response' }, host)).toMatch(/form the adapter does not read/);
     expect(hintFor({ kind: 'input' }, host)).toBe('failed (input)');
   });
@@ -368,7 +375,8 @@ describe('the checks', () => {
     const by = Object.fromEntries(results.map((result) => [result.check, result.detail]));
     expect(by['triage']).toMatch(/did not settle the items \(ModelOutputError\)/);
     expect(by['investigation']).toMatch(/did not answer \(ModelOutputError\)/);
-    expect(by['vote on the right action']).toMatch(/no usable answer.*--max-output-tokens/);
+    expect(by['vote on the right action']).toMatch(/finished, but what it wrote was not a single JSON object/);
+    expect(by['vote on the right action']).not.toContain('--max-output-tokens');
     for (const detail of Object.values(by)) expect(detail).not.toContain('honestly');
   });
 
@@ -381,6 +389,9 @@ describe('the checks', () => {
       [new ModelError('http', 'x', 404), /404.*model name/],
       [new ModelError('network', 'x'), /api\.anthropic\.example\.invalid/],
       [new ModelError('config', 'x'), /trailing space or newline/],
+      [new ModelError('output', 'x', undefined, 'finish MAX_TOKENS'), /hit the output limit \(finish MAX_TOKENS\).*raise --max-output-tokens/],
+      [new ModelError('output', 'x', undefined, 'finish OTHER'), /stopped the answer early \(finish OTHER\).*will not help/],
+      [new ModelError('output', 'x', undefined, 'no text'), /finished without writing an answer/],
     ];
     for (const [error, expected] of cases) {
       const results = await liveCheck([target('claude-small', failing(error)).target, target('claude-large', failing(error)).target]);
@@ -509,7 +520,7 @@ describe('the checks', () => {
       expect(result.worked).toBe(false);
       expect(result.detail).not.toMatch(/401/);
     }
-    expect(results[2]?.detail).toMatch(/no usable answer/);
+    expect(results[2]?.detail).toMatch(/finished, but what it wrote was not a single JSON object/);
   });
 
   it('names the evidence view in the vote prompt it sends', async () => {

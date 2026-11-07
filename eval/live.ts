@@ -408,7 +408,10 @@ export interface MeasureOptions {
 
 /** What went wrong with a call, by kind only: an error can quote the request. */
 function why(error: unknown): string {
-  if (error instanceof ModelError) return error.status === undefined ? error.kind : `${error.kind} ${error.status}`;
+  if (error instanceof ModelError) {
+    const more = error.status ?? error.detail;
+    return more === undefined ? error.kind : `${error.kind} ${more}`;
+  }
   return error instanceof Error ? sanitizeEvidence(error.name, 40) : 'unknown';
 }
 
@@ -710,12 +713,15 @@ export function callHealth(measured: Measured, model: string): CallHealth {
   return { calls: calls.size, failed, kinds };
 }
 
+/** A failure that is the model running out of the output limit, by the finish reason each provider uses for it. */
+const cutOff = (failure: string): boolean => /^output finish (MAX_TOKENS|max_tokens|length)$/.test(failure);
+
 function renderFailures(measured: Measured, participants: readonly Participant[]): string[] {
   const health = participants.map((participant) => ({ participant, health: callHealth(measured, participant.name) })).filter((entry) => entry.health.failed > 0);
   if (health.length === 0) return [];
   const lines = [
     '',
-    'CALLS THAT GOT NO ANSWER, by kind. http NNN: the provider answered with that status (429 is a rate limit, 503 is overload). network: no answer in time, or the connection failed. output, response: an answer that could not be read.',
+    'CALLS THAT GOT NO ANSWER, by kind. http NNN: the provider answered with that status (429 is a rate limit, 503 is overload). network: no answer in time, or the connection failed. output: the answer stopped early (finish ...), was empty (no text), or was not the JSON asked for. response: an answer the adapter could not read.',
   ];
   const seen = new Set<string>();
   for (const { participant, health: value } of health) {
@@ -726,9 +732,18 @@ function renderFailures(measured: Measured, participants: readonly Participant[]
   for (const { participant, health: value } of health) {
     if (mostlyFailed(value)) lines.push(`  ${participant.name} failed on most of its calls, so its rows above describe that, not the model.`);
   }
+  const kinds = [...seen];
   if (seen.has('http 429')) lines.push('  http 429 is the provider limiting how fast calls arrive. Add --min-gap-ms (15000 keeps one model to about 4 calls a minute) and run again.');
   if (seen.has('network')) lines.push('  network can be a timeout: --timeout-ms 120000 allows two minutes for each call.');
-  if (seen.has('output')) lines.push('  output: the answer was cut off or empty. A model that reasons before it answers can use up the whole output limit doing so: try --max-output-tokens 4096.');
+  if (kinds.some(cutOff)) {
+    lines.push('  output finish MAX_TOKENS (max_tokens, length): the answer hit the output limit before it was finished. A model that reasons before it answers can use up the whole limit doing so: try --max-output-tokens 4096.');
+  }
+  const stopped = kinds.filter((kind) => kind.startsWith('output finish ') && !cutOff(kind));
+  if (stopped.length > 0) {
+    lines.push(`  ${stopped.join(', ')}: the provider stopped the answer for a reason other than the output limit, so a larger --max-output-tokens will not help.`);
+  }
+  if (seen.has('output no text')) lines.push('  output no text: the model finished without writing an answer.');
+  if (seen.has('output')) lines.push('  output: the model finished, but what it wrote was not the one JSON object that was asked for. A larger output limit will not help.');
   if (seen.has('refused')) lines.push('  refused: the provider declined or blocked the request. That is about using that provider on this text, not about speed.');
   return lines;
 }

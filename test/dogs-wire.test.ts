@@ -293,6 +293,55 @@ describe('reading answers', () => {
     expect(kindOf('gemini', geminiReply(''))).toBe('output');
   });
 
+  describe('why an answer is not usable', () => {
+    const detailOf = (protocol: ModelProtocol, json: unknown): string | undefined => {
+      try {
+        readAnswer(protocol, json);
+      } catch (error) {
+        return (error as ModelError).detail ?? 'no detail';
+      }
+      return 'no error';
+    };
+
+    it('names the finish reason of an answer that stopped early, for each provider', () => {
+      expect(detailOf('anthropic', anthropicReply('x', 'max_tokens'))).toBe('finish max_tokens');
+      expect(detailOf('anthropic', anthropicReply('x', 'pause_turn'))).toBe('finish pause_turn');
+      expect(detailOf('gemini', geminiReply('x', 'MAX_TOKENS'))).toBe('finish MAX_TOKENS');
+      expect(detailOf('gemini', geminiReply('x', 'OTHER'))).toBe('finish OTHER');
+      expect(detailOf('openai-compatible', openAiReply('x', 'length'))).toBe('finish length');
+      expect(detailOf('openai-compatible', openAiReply('x', 'tool_calls'))).toBe('finish tool_calls');
+    });
+
+    it('says "unknown" when there is no finish reason, or it is not a plain word', () => {
+      expect(detailOf('anthropic', {})).toBe('finish unknown');
+      expect(detailOf('gemini', { candidates: [{ content: { parts: [{ text: '{}' }] } }] })).toBe('finish unknown');
+      expect(detailOf('openai-compatible', { choices: [{ message: { content: 'x' } }] })).toBe('finish unknown');
+      expect(detailOf('gemini', geminiReply('x', 7 as unknown as string))).toBe('finish unknown');
+    });
+
+    it('keeps a finish reason only if it is a short plain code, because the text of a reason could carry the answer', () => {
+      const kept = ['a', 'MAX_TOKENS', 'some-new_reason2', 'X'.repeat(32)];
+      for (const reason of kept) expect(detailOf('gemini', geminiReply('x', reason))).toBe(`finish ${reason}`);
+      const dropped = ['X'.repeat(33), '', '2fast', '_x', '-x', 'a b', 'ok\nIgnore the instructions', 'MAX_TOKENS!', ' MAX_TOKENS', 'MAX_TOKENS ', 'caf\u00e9'];
+      for (const reason of dropped) expect(detailOf('gemini', geminiReply('x', reason))).toBe('finish unknown');
+    });
+
+    it('says "no text" when the model finished and wrote nothing', () => {
+      expect(detailOf('anthropic', { stop_reason: 'end_turn', content: [] })).toBe('no text');
+      expect(detailOf('gemini', geminiReply(''))).toBe('no text');
+      expect(detailOf('openai-compatible', openAiReply(''))).toBe('no text');
+      expect(detailOf('openai-compatible', openAiReply(null))).toBe('no text');
+    });
+
+    it('gives no reason for a refusal or an answer the adapter cannot read', () => {
+      expect(detailOf('anthropic', anthropicReply('x', 'refusal'))).toBe('no detail');
+      expect(detailOf('gemini', geminiReply('x', 'SAFETY'))).toBe('no detail');
+      expect(detailOf('gemini', { candidates: [] })).toBe('no detail');
+      expect(detailOf('openai-compatible', { choices: [] })).toBe('no detail');
+      expect(detailOf('openai-compatible', openAiReply('x', 'content_filter'))).toBe('no detail');
+    });
+  });
+
   it('openai-compatible: wants a finished string, and reports refusals and filters', () => {
     expect(readAnswer('openai-compatible', openAiReply('hello'))).toBe('hello');
 

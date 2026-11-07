@@ -14,7 +14,9 @@
  *   hold a dog open or fill its memory.
  * - An error never includes the response body, the headers or the underlying
  *   error's message. Model API errors can quote the request, and a request holds
- *   the evidence. Only the kind of failure and an HTTP status number survive.
+ *   the evidence. Only the kind of failure, an HTTP status number and, for an
+ *   answer that stopped early, the provider's finish reason (when it is a plain
+ *   code) survive.
  */
 
 export type ModelErrorKind = 'config' | 'input' | 'network' | 'http' | 'response' | 'refused' | 'output';
@@ -37,12 +39,19 @@ export class ModelError extends Error {
   readonly kind: ModelErrorKind;
   /** The HTTP status, for `http` errors. */
   readonly status?: number;
+  /**
+   * For `output` errors from a provider's reply, why the answer is not usable:
+   * `finish MAX_TOKENS` (the provider's own finish reason) or `no text`. Absent
+   * when the model finished and what it wrote was not the JSON that was asked for.
+   */
+  readonly detail?: string;
 
-  constructor(kind: ModelErrorKind, message: string, status?: number) {
+  constructor(kind: ModelErrorKind, message: string, status?: number, detail?: string) {
     super(message);
     this.name = ERROR_NAMES[kind];
     this.kind = kind;
     if (status !== undefined) this.status = status;
+    if (detail !== undefined) this.detail = detail;
   }
 }
 
