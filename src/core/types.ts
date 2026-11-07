@@ -71,6 +71,13 @@ export interface GuardDogEvent {
   kind: EventKind;
   traceId?: string;
   attrs: Record<string, string | number | boolean>;
+  /**
+   * Names of `attrs` whose values the client of the observed request wrote or
+   * chose (a forwarded address, a referer, a header). The rest, when this is
+   * present, are values the sidecar read from the host. Absent: not said.
+   * Set by the sidecar from the code path that produced each value.
+   */
+  clientWritten?: string[];
   masked: true;
 }
 

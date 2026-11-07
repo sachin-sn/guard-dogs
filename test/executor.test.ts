@@ -705,6 +705,75 @@ describe('executor: minority alert', () => {
   });
 });
 
+describe('executor: a target that rests on a field the client writes', () => {
+  const client = { targetSupport: new Map([['evt-1', 'client' as const]]) };
+  const unknown = { targetSupport: new Map([['evt-1', 'unknown' as const]]) };
+
+  it('holds the containment, runs nothing, and sends it as its own kind of alert', async () => {
+    const { exec, adapter, sent, types } = setup();
+    const result = await exec.submit(level3(), client);
+
+    expect(result.status).toBe('pending-human');
+    expect(result.decision?.codes).toContain('client-written-target');
+    expect(adapter.applyCalls).toEqual([]);
+    expect(sent.map((n) => n.kind)).toEqual(['unverified-target']);
+    expect(sent[0]?.summary).toMatch(/^Review needed: .*2 of 2 approved \(2 needed\).*rests on a field the client writes/);
+    expect(types()).toEqual(['gate.decision']);
+  });
+
+  it('keeps the held proposal as it was judged, so a person clears the same decision', async () => {
+    const { exec, adapter, sent, clock } = setup();
+    const action = level3();
+    await exec.submit(action, client);
+
+    const approved = await exec.approve(action.id, approval(action, clock));
+    expect(approved.status).toBe('applied');
+    expect(adapter.applyCalls).toEqual(['act-1']);
+    // Cleared by a person, so it is no longer an alert about the target.
+    expect(sent.map((n) => n.kind)).toEqual(['unverified-target', 'decision']);
+    expect(sent[1]?.summary).not.toContain('Review needed');
+  });
+
+  it('calls it a dissent when a minority flagged it as well, which is the one a person must not miss', async () => {
+    const MODELS = ['model-x', 'model-y'];
+    const dogs = Array.from({ length: 7 }, (_, i) => ({ id: `dog-${i + 1}`, model: MODELS[i % 2]!, evidenceView: 'raw-logs' }));
+    const votes = Array.from({ length: 7 }, (_, i) => ({ voter: `dog-${i + 1}`, decision: (i < 3 ? 'approve' : 'reject') as 'approve' | 'reject' }));
+    const { exec, sent } = setup({ policy: policy({ panel: dogs, requireDistinctModels: false }) });
+    await exec.submit(level3({ votes }), client);
+
+    expect(sent.map((n) => n.kind)).toEqual(['dissent']);
+    expect(sent[0]?.summary).toContain('too few to act on');
+    expect(sent[0]?.summary).toContain('rests on a field the client writes');
+  });
+
+  it('also sends the hold for events that do not say, when policy needs them to', async () => {
+    const strict = setup({ policy: policy({ requireTargetProvenance: true }) });
+    const result = await strict.exec.submit(level3(), unknown);
+    expect(result.status).toBe('pending-human');
+    expect(strict.sent.map((n) => n.kind)).toEqual(['unverified-target']);
+
+    const lax = setup();
+    expect((await lax.exec.submit(level3(), unknown)).status).toBe('applied');
+    expect(lax.sent.map((n) => n.kind)).toEqual(['decision']);
+  });
+
+  it('still reports a full queue of waiting proposals as an alert about the target', async () => {
+    const { exec, sent } = setup({ maxPending: 1 });
+    await exec.submit(level3({ id: 'act-a' }), client);
+    const overflow = await exec.submit(level3({ id: 'act-b' }), client);
+
+    expect(overflow.status).toBe('queue-full');
+    expect(sent.map((n) => n.kind)).toEqual(['unverified-target', 'unverified-target']);
+  });
+
+  it('does not touch an alert that cites the same event', async () => {
+    const { exec, sent } = setup({ adapters: {} });
+    const result = await exec.submit(alertAction(), client);
+    expect(result.status).toBe('applied');
+    expect(sent.map((n) => n.kind)).toEqual(['alert']);
+  });
+});
+
 describe('executor: nothing runs that the gate did not clear', () => {
   it('holds for every combination of level, kind, target, votes and duration', async () => {
     const gatePolicy = policy();

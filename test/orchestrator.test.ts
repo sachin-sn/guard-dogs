@@ -979,7 +979,15 @@ describe('end to end', () => {
     return { client, seen };
   }
 
-  function stack(investigatorReply: (request: ModelRequest) => string, triageReply?: (request: ModelRequest) => string) {
+  interface StackOptions {
+    /** The gate policy, when the test needs one other than the default. */
+    policy?: ReturnType<typeof createGatePolicy>;
+    /** Where the case's targets are read from. Default: the path of a created file, for quarantine. */
+    sources?: Parameters<typeof targetsFromIncident>[1]['sources'];
+  }
+
+  function stack(investigatorReply: (request: ModelRequest) => string, triageReply?: (request: ModelRequest) => string, options: StackOptions = {}) {
+    const gate = options.policy ?? policy;
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestrator-e2e-'));
     dirs.push(dir);
     const clock = new Clock();
@@ -993,7 +1001,7 @@ describe('end to end', () => {
       async revert() {},
     };
     const executor = new Executor({
-      policy,
+      policy: gate,
       log,
       adapters: { 'contain.quarantine-file': adapter, 'contain.block-source': adapter, 'contain.rate-limit': adapter },
       notifier: { notify: () => undefined },
@@ -1012,12 +1020,12 @@ describe('end to end', () => {
     const investigatorClient = stubClient('claude-large', investigatorReply);
     const orchestrator = new Orchestrator({
       pipeline,
-      policy,
-      panel: new Panel({ policy, dogs: dogs().list, log }),
+      policy: gate,
+      panel: new Panel({ policy: gate, dogs: dogs().list, log }),
       investigators: [new Investigator({ id: 'investigator-claude', client: investigatorClient.client, clock: clock.now })],
       ...(triageClient === undefined ? {} : { triage: new TriageDog({ clients: [triageClient.client] }) }),
       targets: (incident) =>
-        targetsFromIncident(incident, { sources: [{ kinds: ['file.created'], attr: 'path', actions: ['contain.quarantine-file'] }] }),
+        targetsFromIncident(incident, { sources: options.sources ?? [{ kinds: ['file.created'], attr: 'path', actions: ['contain.quarantine-file'] }] }),
       views: { 'raw-logs': rawView, summaries: summaryView },
       log,
       clock: clock.now,
@@ -1104,5 +1112,55 @@ describe('end to end', () => {
     const second = await orchestrator.process([upload('evt-up-7')]);
     expect(applied).toHaveLength(1);
     expect(second.response.proposals.alreadyHandled).toBe(1);
+  });
+
+  describe('an address the client wrote', () => {
+    const ADDRESS = '203.0.113.50';
+    const token = createMasker({ pseudonymKey: 'k'.repeat(32) }).maskText(ADDRESS).text;
+    const gate = createGatePolicy({
+      panel: members,
+      preApproved: {
+        'contain.block-source': { maxTtlSeconds: 900, targets: ['ip_*'] },
+        'contain.quarantine-file': { maxTtlSeconds: 900, targets: ['/var/www/*'] },
+      },
+      protectedTargets: ['guard-dog:*'],
+      approvers: ['alice'],
+    });
+    const sources = [
+      { kinds: ['file.created'] as EventKind[], attr: 'path', actions: ['contain.quarantine-file' as const] },
+      { kinds: ['file.created'] as EventKind[], attr: 'client_ip', actions: ['contain.block-source' as const] },
+    ];
+    const block = JSON.stringify({ decision: 'propose', kind: 'contain.block-source', target: token, evidence: [], ttlSeconds: 600, reason: 'The upload came from this address.' });
+    const blockCiting = (request: ModelRequest): string => block.replace('"evidence":[]', `"evidence":${JSON.stringify([firstShown(request)])}`);
+    const run = async (clientWritten?: string[]) => {
+      const { orchestrator, applied } = stack(blockCiting, escalateWhatIsAsked, { policy: gate, sources });
+      const { response } = await orchestrator.process([
+        { ...upload('evt-ip-1', { client_ip: ADDRESS }), ...(clientWritten === undefined ? {} : { clientWritten }) },
+      ]);
+      return { proposal: response.cases[0]?.proposals[0], applied };
+    };
+
+    it('is held for a person when the sidecar says the client wrote it, though every dog approved', async () => {
+      const { proposal, applied } = await run(['client_ip']);
+      expect(proposal).toMatchObject({ kind: 'contain.block-source', verdict: 'info:panel-approved', status: 'pending-human' });
+      expect(applied).toEqual([]);
+    });
+
+    it('runs when the sidecar read it from the host, and when the event does not say', async () => {
+      for (const clientWritten of [[], undefined]) {
+        const { proposal, applied } = await run(clientWritten);
+        expect(proposal).toMatchObject({ kind: 'contain.block-source', status: 'applied' });
+        expect(applied).toEqual([`contain.block-source ${token}`]);
+      }
+    });
+
+    it('is shown to the triage reviewer and the investigator as tagged', async () => {
+      const { orchestrator, investigatorClient, triageClient } = stack(blockCiting, escalateWhatIsAsked, { policy: gate, sources });
+      await orchestrator.process([{ ...upload('evt-ip-2', { client_ip: ADDRESS }), clientWritten: ['client_ip'] }]);
+
+      expect(triageClient?.seen[0]?.user).toContain('"clientWritten":["client_ip"]');
+      expect(investigatorClient.seen[0]?.user).toContain('"clientWritten":["client_ip"]');
+      expect(investigatorClient.seen[0]?.system).not.toContain('clientWritten');
+    });
   });
 });

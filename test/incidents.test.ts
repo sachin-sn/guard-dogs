@@ -27,6 +27,7 @@ interface FlagSpec {
   attrs?: Record<string, string | number | boolean>;
   kind?: EventKind;
   summary?: string;
+  clientWritten?: string[];
 }
 
 function flag(eventId: string, spec: FlagSpec = {}): FlaggedHit {
@@ -47,6 +48,7 @@ function flag(eventId: string, spec: FlagSpec = {}): FlaggedHit {
       service,
       kind: spec.kind ?? 'file.created',
       attrs: spec.attrs ?? { path: '/var/www/html/uploads/x.php', peer: '203.0.113.9' },
+      ...(spec.clientWritten === undefined ? {} : { clientWritten: spec.clientWritten }),
       masked: true,
     },
     alert: 'sent',
@@ -144,6 +146,38 @@ describe('groupIncidents', () => {
 
   it('returns nothing for nothing', () => {
     expect(groupIncidents([], OPTIONS)).toEqual([]);
+  });
+});
+
+describe('which values the client wrote', () => {
+  const tagged = flag('t', { attrs: { path: '/var/www/html/uploads/x.php', client_ip: 'ip_aaaaaaaaaaaa', referer: 'a note' }, clientWritten: ['client_ip', 'referer'] });
+  const none = flag('n', { clientWritten: [] });
+  const silent = flag('s');
+  const built = buildCase(incidentOf(tagged, none, silent), [], TARGETS) as Case;
+  const eventOf = (id: string) => (built.evidence.find((e) => e.id === id)?.content as { event: Record<string, unknown> }).event;
+
+  it('is part of the event every reader is shown, beside the attributes it describes', () => {
+    expect(eventOf('t')).toEqual({
+      kind: 'file.created',
+      layer: 'application',
+      service: 'shop-web',
+      ts: '2026-10-23T11:59:00Z',
+      attrs: { path: '/var/www/html/uploads/x.php', client_ip: 'ip_aaaaaaaaaaaa', referer: 'a note' },
+      clientWritten: ['client_ip', 'referer'],
+    });
+    expect(Object.keys(eventOf('t'))).toEqual(['kind', 'layer', 'service', 'ts', 'attrs', 'clientWritten']);
+  });
+
+  it('says that nothing is client-written when the sidecar said so, and nothing when it did not say', () => {
+    expect(eventOf('n')['clientWritten']).toEqual([]);
+    expect('clientWritten' in eventOf('s')).toBe(false);
+  });
+
+  it('is in the raw view and in what triage sees, and not in the summary, which names no attribute', () => {
+    expect(JSON.stringify(rawView(built))).toContain('"clientWritten":["client_ip","referer"]');
+    const item = triageItem(incidentOf(tagged));
+    expect(JSON.stringify(item.evidence)).toContain('"clientWritten":["client_ip","referer"]');
+    expect(JSON.stringify(summaryView(built))).not.toContain('clientWritten');
   });
 });
 

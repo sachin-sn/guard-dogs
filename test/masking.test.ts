@@ -193,6 +193,36 @@ describe('maskEvent', () => {
     expect(message).not.toContain('secret-value');
   });
 
+  it('carries the names of the client-written attributes through as they are, and never masks them', () => {
+    const input = event({ client_ip: '198.51.100.23', path: '/x' }, { clientWritten: ['client_ip', 'password', '10.0.0.1'] });
+    const { event: masked } = masker.maskEvent(input);
+    expect(masked.clientWritten).toEqual(['client_ip', 'password', '10.0.0.1']);
+    expect(masked.clientWritten).not.toBe(input.clientWritten);
+    input.clientWritten?.push('later');
+    expect(masked.clientWritten).toHaveLength(3);
+    expect(validateEvent(masked).ok).toBe(true);
+  });
+
+  it('leaves the field off an event whose sidecar did not say, and keeps an empty list as an empty list', () => {
+    expect('clientWritten' in masker.maskEvent(event({ path: '/x' })).event).toBe(false);
+    expect(masker.maskEvent(event({ path: '/x' }, { clientWritten: [] })).event.clientWritten).toEqual([]);
+  });
+
+  it('refuses a list that is not a list of attribute names, a string included, without echoing what it held', () => {
+    const bad: unknown[] = ['client_ip', [1], [''], ['a', 'a'], Array.from({ length: 65 }, (_, i) => `n${i}`), ['x'.repeat(65)], {}, null, 7];
+    for (const clientWritten of bad) {
+      let message = '';
+      try {
+        masker.maskEvent(event({ path: '/x' }, { clientWritten: clientWritten as string[] }));
+      } catch (error) {
+        expect(error).toBeInstanceOf(TypeError);
+        message = (error as Error).message;
+      }
+      expect(message, JSON.stringify(clientWritten)).toContain('clientWritten');
+      expect(message).not.toContain('client_ip');
+    }
+  });
+
   it('does not change the input event', () => {
     const input = event({ path: '/cb?token=abc123def' });
     masker.maskEvent(input);

@@ -22,6 +22,30 @@ describe('schemas', () => {
     expect(validateEvent(fixture('event.unmasked.json')).ok).toBe(false);
   });
 
+  describe('which attributes the client wrote', () => {
+    const base = fixture('event.valid.json') as Record<string, unknown>;
+    const withTag = (clientWritten: unknown) => validateEvent({ ...base, clientWritten }).ok;
+
+    it('accepts a list of names, an empty list, and no list', () => {
+      expect(validateEvent(base).ok).toBe(true);
+      expect(withTag([])).toBe(true);
+      expect(withTag(['client_ip', 'referer'])).toBe(true);
+      expect(withTag(Array.from({ length: 64 }, (_, i) => `n${i}`))).toBe(true);
+      expect(withTag(['x'.repeat(64)])).toBe(true);
+    });
+
+    it('rejects anything else', () => {
+      expect(withTag('client_ip')).toBe(false);
+      expect(withTag({ client_ip: true })).toBe(false);
+      expect(withTag(null)).toBe(false);
+      expect(withTag([1])).toBe(false);
+      expect(withTag([''])).toBe(false);
+      expect(withTag(['a', 'a'])).toBe(false);
+      expect(withTag(Array.from({ length: 65 }, (_, i) => `n${i}`))).toBe(false);
+      expect(withTag(['x'.repeat(65)])).toBe(false);
+    });
+  });
+
   it('accepts a level 3 action with a two-vote panel, reversible and expiring', () => {
     expect(validateAction(fixture('action.level3.valid.json')).ok).toBe(true);
   });

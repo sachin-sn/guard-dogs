@@ -92,7 +92,15 @@ function piece(entry: FlaggedHit): CaseEvidence {
       severity: hit.severity,
       ruleSummary: sanitizeEvidence(hit.summary, 200),
       flagged: hit.evidence,
-      event: { kind: event.kind, layer: event.layer, service: event.service, ts: event.ts, attrs: event.attrs },
+      // `clientWritten` names the attrs the client of the request chose, so a reader sees which values an attacker could have set.
+      event: {
+        kind: event.kind,
+        layer: event.layer,
+        service: event.service,
+        ts: event.ts,
+        attrs: event.attrs,
+        ...(event.clientWritten === undefined ? {} : { clientWritten: event.clientWritten }),
+      },
     },
   };
 }
