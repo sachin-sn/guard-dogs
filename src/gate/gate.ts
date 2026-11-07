@@ -351,8 +351,9 @@ export function evaluateAction(raw: unknown, ctx: GateContext, policy: GatePolic
     if (matchesAny(policy.protectedTargets, action.target)) soft.push('protected-target');
 
     // Whatever the panel voted: a field the client writes can name anyone, so a containment
-    // that rests on nothing else is a containment an attacker chose the victim of.
-    if (action.kind.startsWith('contain.') && ctx.targetSupport !== undefined) {
+    // that rests on nothing else is a containment an attacker chose the victim of. (The schema
+    // allows levels 3 and 4 for containment only, so every action here is one.)
+    if (ctx.targetSupport !== undefined) {
       const held = new Set(action.evidence.flatMap((id) => ctx.targetSupport?.get(id) ?? []));
       if (held.has('client') && !held.has('observed')) soft.push('client-written-target');
       else if (policy.requireTargetProvenance && held.has('unknown') && !held.has('observed')) soft.push('target-provenance-unknown');

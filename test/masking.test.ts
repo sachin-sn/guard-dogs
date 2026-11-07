@@ -209,7 +209,7 @@ describe('maskEvent', () => {
   });
 
   it('refuses a list that is not a list of attribute names, a string included, without echoing what it held', () => {
-    const bad: unknown[] = ['client_ip', [1], [''], ['a', 'a'], Array.from({ length: 65 }, (_, i) => `n${i}`), ['x'.repeat(65)], {}, null, 7];
+    const bad: unknown[] = ['client_ip', 'abc', [1], [''], ['a', 'a'], Array.from({ length: 65 }, (_, i) => `n${i}`), ['x'.repeat(65)], {}, null, 7];
     for (const clientWritten of bad) {
       let message = '';
       try {

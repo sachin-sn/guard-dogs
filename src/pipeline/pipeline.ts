@@ -413,7 +413,7 @@ export class Pipeline {
     const client = new Set<string>();
     const observed = new Set<string>();
     for (const [name, value] of Object.entries(event.attrs)) {
-      if (typeof value !== 'string' || value.length === 0 || value.length > MAX_HELD_VALUE) continue;
+      if (typeof value !== 'string' || value.length > MAX_HELD_VALUE) continue;
       (written.has(name) ? client : observed).add(value);
     }
     this.held.set(event.id, { tagged: true, client, observed });
