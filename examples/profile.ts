@@ -6,6 +6,7 @@
  *   npm run profile -- --run --runs 5 --json profile.json
  *   npm run profile -- --run --only anthropic
  *   npm run profile -- --run --only gemini --min-gap-ms 15000
+ *   npm run profile -- --run --votes 16 --investigations 0 --triage 0 --all-views
  *
  * This spends API credit, so nothing is sent without `--run`, and the plan is
  * refused if it is bigger than `--max-calls` (default 300). The default plan is
@@ -22,14 +23,19 @@
  * with HTTP 429, and the report would show a model that never answers. The report
  * says so, by kind; `--min-gap-ms` spaces one model's calls to stay under it.
  *
+ * `--all-views` asks each chosen proposal in every evidence view it has, not
+ * only the one the plan gave it, and adds a VIEWS section to the report. A note
+ * that one view carries is then told apart from one that all of them carry.
+ * Those extra calls come on top of the default plan and are counted in it.
+ *
  * Run `npm run live-check` first: a profile on a model that does not answer
  * measures the outage.
  */
 
 import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { collectCases, callCount, callHealth, plan, renderMeasured, renderPlan, DEFAULT_LIMITS, MAX_RUNS, measure, type Limits, type Participant } from '../eval/live.js';
-import { PROVIDERS, loadDotEnv, targetsFromEnv, type Provider } from './live-check.js';
+import { collectCases, callCount, callHealth, plan, renderMeasured, renderPlan, DEFAULT_LIMITS, DEFAULT_TIMEOUT_MS, MAX_RUNS, measure, type Limits, type Participant } from '../eval/live.js';
+import { DEFAULT_MAX_OUTPUT_TOKENS, PROVIDERS, loadDotEnv, targetsFromEnv, type Provider } from './live-check.js';
 import type { TransportOptions } from '../src/index.js';
 
 const DEFAULT_MAX_CALLS = 300;
@@ -61,6 +67,7 @@ export async function main(
     investigations: whole(args, '--investigations', 0) ?? DEFAULT_LIMITS.investigations,
     triage: whole(args, '--triage', 0) ?? DEFAULT_LIMITS.triage,
     runs: whole(args, '--runs', 1) ?? DEFAULT_LIMITS.runs,
+    ...(args.includes('--all-views') ? { allViews: true } : {}),
   };
   if (limits.runs > MAX_RUNS) throw new RangeError(`--runs is at most ${MAX_RUNS}`);
   const maxCalls = whole(args, '--max-calls', 1) ?? DEFAULT_MAX_CALLS;
@@ -102,7 +109,7 @@ export async function main(
   for (const line of renderPlan(chosen, participants)) print(line);
   if (minGapMs !== undefined && minGapMs > 0) {
     // The longest queue: a large model's votes and investigations, or a small model's triage requests, once for each run.
-    const longest = Math.max(large > 0 ? (chosen.votes.length + chosen.investigations.length) * limits.runs : 0, participants.length > large ? chosen.triage.length * limits.runs : 0);
+    const longest = Math.max(large > 0 ? (chosen.votes.length + chosen.variants.length + chosen.investigations.length) * limits.runs : 0, participants.length > large ? chosen.triage.length * limits.runs : 0);
     print(`  pacing:         at least ${minGapMs} ms between one model's calls, so the slowest model takes at least ${Math.ceil((longest * minGapMs) / 60_000)} minutes`);
   }
   if (calls > maxCalls) {
@@ -133,7 +140,9 @@ export async function main(
   if (jsonFile !== undefined) {
     // Counts and outcomes only: what the models wrote is not kept.
     const models = participants.map((participant) => ({ name: participant.name, family: participant.family, tier: participant.tier, api: participant.api }));
-    fs.writeFileSync(jsonFile, `${JSON.stringify({ limits, calls, models, ...measured }, null, 2)}\n`);
+    // The settings are what the run used, so a file can say how it was made.
+    const settings = { minGapMs: minGapMs ?? 0, maxOutputTokens: maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS, timeoutMs: timeoutMs ?? DEFAULT_TIMEOUT_MS };
+    fs.writeFileSync(jsonFile, `${JSON.stringify({ limits, settings, calls, models, ...measured }, null, 2)}\n`);
     print(`\nwrote ${jsonFile}`);
   }
   const failed = participants.reduce((sum, participant) => sum + callHealth(measured, participant.name).failed, 0);
