@@ -38,6 +38,8 @@ export type GateCode =
   | 'panel-split'
   | 'panel-not-diverse'
   | 'panel-one-sided'
+  | 'client-written-target'
+  | 'target-provenance-unknown'
   // Information.
   | 'minority-flag'
   | 'automatic-level-1-2'
@@ -62,6 +64,10 @@ const REASONS: Readonly<Record<GateCode, string>> = {
   'minority-flag': 'Several guard dogs flagged this, too few to act on. A human should look.',
   'panel-not-diverse': 'The panel agreed, but the approving guard dogs share one model.',
   'panel-one-sided': 'The panel agreed, but too few of the approvals came from outside the family that approved most.',
+  'client-written-target':
+    'The only evidence for this target is a field the client writes, and a client can set that to name anyone.',
+  'target-provenance-unknown':
+    'Policy needs the sidecar to say which fields the client wrote, and the events cited do not say.',
   'automatic-level-1-2': 'Observe and alert actions run automatically and are always reported.',
   'panel-approved': 'The panel agreed.',
   'human-approved': 'A valid human approval cleared the holds.',
@@ -75,12 +81,29 @@ export interface HumanApproval {
   actionDigest: string;
 }
 
+/**
+ * How one cited event holds the target of a containment, as the sidecar
+ * tagged its fields (`GuardDogEvent.clientWritten`):
+ * - observed: the target is the whole value of a field the sidecar read from the host
+ * - client:   it is the whole value of a field the client wrote, and of no observed one
+ * - unknown:  the sidecar did not say which fields the client wrote
+ * An event that holds the target in no field at all (a route built from a service
+ * and a path, say) has no entry.
+ */
+export type TargetSupport = 'observed' | 'client' | 'unknown';
+
 export interface GateContext {
   now: Date;
   /** Ids of events and informer records that exist. When given, level 3 and 4 may cite only these. */
   knownEvidenceIds?: ReadonlySet<string>;
   /** Highest level each cited record allows (from `ExposureFinding.maxLevel`). Evidence not listed is unrestricted. */
   ceilings?: ReadonlyMap<string, ResponseLevel>;
+  /**
+   * For each cited event, how it holds the action's target (from the pipeline,
+   * as the events stood when the action was proposed). Without it the gate does
+   * not look at where a target came from.
+   */
+  targetSupport?: ReadonlyMap<string, TargetSupport>;
   humanApproval?: HumanApproval;
 }
 
@@ -326,6 +349,15 @@ export function evaluateAction(raw: unknown, ctx: GateContext, policy: GatePolic
       }
     }
     if (matchesAny(policy.protectedTargets, action.target)) soft.push('protected-target');
+
+    // Whatever the panel voted: a field the client writes can name anyone, so a containment
+    // that rests on nothing else is a containment an attacker chose the victim of. (The schema
+    // allows levels 3 and 4 for containment only, so every action here is one.)
+    if (ctx.targetSupport !== undefined) {
+      const held = new Set(action.evidence.flatMap((id) => ctx.targetSupport?.get(id) ?? []));
+      if (held.has('client') && !held.has('observed')) soft.push('client-written-target');
+      else if (policy.requireTargetProvenance && held.has('unknown') && !held.has('observed')) soft.push('target-provenance-unknown');
+    }
   }
 
   const approval = approvalIsValid(ctx.humanApproval, digest, ctx.now, policy);
@@ -333,6 +365,7 @@ export function evaluateAction(raw: unknown, ctx: GateContext, policy: GatePolic
   if (approval === false) info.push('invalid-approval');
 
   const flagged = info.includes('minority-flag');
+  const unverified = soft.includes('client-written-target') || soft.includes('target-provenance-unknown');
   const panelNote =
     count === undefined
       ? ''
@@ -341,11 +374,13 @@ export function evaluateAction(raw: unknown, ctx: GateContext, policy: GatePolic
   // A flag with the action running can only mean a human has since approved it, so the warning is over.
   const summaryFor = (outcome: GateOutcome): string => {
     const warn = flagged && outcome !== 'execute';
+    const warnTarget = unverified && outcome !== 'execute';
     return (
-      (warn ? 'Review needed: ' : '') +
+      (warn || warnTarget ? 'Review needed: ' : '') +
       `Level ${action.level} ${action.kind} on ${sanitizeEvidence(action.target, 80)}: ${OUTCOME_TEXT[outcome]}. ` +
       panelNote +
       (warn ? 'Several guard dogs flagged this, too few to act on. ' : '') +
+      (warnTarget ? 'The target rests on a field the client writes, or on events that do not say who wrote their fields, so it could not be checked. ' : '') +
       `Reason given: ${sanitizeEvidence(action.reason, 160)}`
     );
   };

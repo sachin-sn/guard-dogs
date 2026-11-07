@@ -45,6 +45,8 @@ export interface Notification {
     | 'decision'
     /** A minority of the panel flagged something that was not acted on. Worth a higher-attention channel than 'decision'. */
     | 'dissent'
+    /** A containment the panel may have agreed on was held because its target rests on a field the client writes. */
+    | 'unverified-target'
     | 'apply-failed'
     | 'revert-failed'
     | 'audit-failed'
@@ -147,11 +149,15 @@ function errorText(error: unknown): string {
 
 /**
  * For a decision that did not run. If enough guard dogs flagged it anyway, it goes
- * out as 'dissent' so it is not lost among routine reports. (A decision that ran,
- * even after a human cleared a minority-flagged one, is already known to the human.)
+ * out as 'dissent' so it is not lost among routine reports. One held because its
+ * target rests on a field the client writes goes out as 'unverified-target': the
+ * panel may well have agreed, which is the reason a person should look. (A decision
+ * that ran, even after a human cleared one of these, is already known to the human.)
  */
 function decisionKind(decision: GateDecision): Notification['kind'] {
-  return decision.codes.includes('minority-flag') ? 'dissent' : 'decision';
+  if (decision.codes.includes('minority-flag')) return 'dissent';
+  if (decision.codes.includes('client-written-target') || decision.codes.includes('target-provenance-unknown')) return 'unverified-target';
+  return 'decision';
 }
 
 function isContainment(kind: ActionKind): boolean {

@@ -80,6 +80,14 @@ export interface GatePolicyInput {
    * that the other families miss waits for a person. See docs/evaluation.md.
    */
   minOutsideFamily?: number;
+  /**
+   * Hold a containment, whatever the panel voted, when the events it cites do
+   * not say which of their fields the client wrote, so nobody can tell whether
+   * its target was chosen by an attacker. Default false: a containment is held
+   * only when the events say the client wrote the field its target came from.
+   * Turn it on once every sidecar tags its events (`clientWritten`).
+   */
+  requireTargetProvenance?: boolean;
   /** Level 3 actions that may run automatically, per kind. Anything else waits for a human. */
   preApproved?: Partial<Record<ActionKind, PreApproval>>;
   /**
@@ -99,6 +107,7 @@ export interface GatePolicy {
   readonly dissentAlertMin: number;
   readonly requireDistinctModels: boolean;
   readonly minOutsideFamily: number;
+  readonly requireTargetProvenance: boolean;
   readonly preApproved: Readonly<Partial<Record<ActionKind, PreApproval>>>;
   readonly protectedTargets: readonly string[];
   readonly approvers: ReadonlySet<string>;
@@ -145,6 +154,10 @@ export function createGatePolicy(input: GatePolicyInput): GatePolicy {
     throw new RangeError('minOutsideFamily must be a whole number from 0 to one less than the size of the panel');
   }
 
+  // Only an omitted setting means the default: a null from a config file is a mistake, not a choice.
+  const requireTargetProvenance = input.requireTargetProvenance === undefined ? false : input.requireTargetProvenance;
+  if (typeof requireTargetProvenance !== 'boolean') throw new RangeError('requireTargetProvenance must be true or false');
+
   const preApproved: Partial<Record<ActionKind, PreApproval>> = {};
   for (const [kind, approval] of Object.entries(input.preApproved ?? {}) as [ActionKind, PreApproval][]) {
     if (!PRE_APPROVABLE.includes(kind)) {
@@ -175,6 +188,7 @@ export function createGatePolicy(input: GatePolicyInput): GatePolicy {
     dissentAlertMin,
     requireDistinctModels: input.requireDistinctModels ?? true,
     minOutsideFamily,
+    requireTargetProvenance,
     preApproved,
     protectedTargets,
     approvers: new Set(input.approvers ?? []),

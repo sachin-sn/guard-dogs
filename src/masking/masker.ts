@@ -207,6 +207,10 @@ export function createMasker(options: MaskerOptions): Masker {
       kind: event.kind,
       ...(event.traceId === undefined ? {} : { traceId: event.traceId }),
       attrs,
+      // Names, not values: nothing to mask. The schema decides whether the list is well formed.
+      ...(event.clientWritten === undefined
+        ? {}
+        : { clientWritten: Array.isArray(event.clientWritten) ? [...event.clientWritten] : event.clientWritten }),
       masked: true,
     };
 

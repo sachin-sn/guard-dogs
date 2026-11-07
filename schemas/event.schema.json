@@ -36,6 +36,13 @@
         ]
       }
     },
+    "clientWritten": {
+      "description": "Names of attrs whose values the client of the observed request wrote or chose (a forwarded address, a referer, a user agent, a header), as opposed to values the sidecar read from the host itself (the socket, the file system, the process table). Set by the sidecar from the code path that produced each value, never from event content. Absent means the sidecar did not say. An empty list says that nothing here is client-written.",
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 64 }
+    },
     "masked": { "const": true }
   }
 }

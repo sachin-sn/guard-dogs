@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { AuditLog } from '../audit/log.js';
 import type { GuardDogEvent, InventoryItem, JsonValue, ProposedAction, ResponseLevel } from '../core/types.js';
 import type { Executor, SubmitResult, SubmitStatus } from '../executor/executor.js';
+import type { TargetSupport } from '../gate/gate.js';
 import { matchAdvisories, type ExposureFinding } from '../exposure/matcher.js';
 import type { Masker, MaskReport, UnmaskedEvent } from '../masking/masker.js';
 import { runTier1 } from '../rules/engine.js';
@@ -99,6 +100,23 @@ export interface AdvisoryReport {
   audited: boolean;
 }
 
+/**
+ * The whole string values of one remembered event, split by who wrote them, as
+ * its sidecar tagged them. Kept so that a proposal naming one of them can be
+ * told how the events it cites hold its target (see `Pipeline.submit`).
+ */
+interface HeldValues {
+  tagged: boolean;
+  client: ReadonlySet<string>;
+  observed: ReadonlySet<string>;
+}
+
+/** An event whose sidecar did not say which fields the client wrote. */
+const UNTAGGED: HeldValues = { tagged: false, client: new Set(), observed: new Set() };
+
+/** The longest target an action may name (`schemas/action.schema.json`). Longer values cannot be one. */
+const MAX_HELD_VALUE = 256;
+
 type Masked = { ok: true; event: GuardDogEvent; report: MaskReport } | { ok: false; eventId: string; reason: string };
 
 const MAX_SAMPLES = 5;
@@ -154,6 +172,8 @@ export class Pipeline {
   private readonly known = new Set<string>();
   /** How far each advisory record allows a response to go (from the matcher). */
   private readonly ceilings = new Map<string, ResponseLevel>();
+  /** What each remembered event holds, by who wrote it. Forgotten with the event, so bounded by `maxKnownEvidence`. */
+  private readonly held = new Map<string, HeldValues>();
 
   constructor(options: PipelineOptions) {
     this.masker = options.masker;
@@ -187,9 +207,16 @@ export class Pipeline {
     return this.known.has(id);
   }
 
-  /** How much the pipeline is remembering, for monitoring. Both numbers are bounded by `maxKnownEvidence`. */
-  stats(): { knownEvidence: number; ceilings: number } {
-    return { knownEvidence: this.known.size, ceilings: this.ceilings.size };
+  /**
+   * How much the pipeline is remembering, for monitoring. All numbers are
+   * bounded by `maxKnownEvidence`. `tagged` counts the remembered events whose
+   * sidecar said which fields the client wrote; the others cannot support a
+   * containment under `requireTargetProvenance`.
+   */
+  stats(): { knownEvidence: number; ceilings: number; tagged: number } {
+    let tagged = 0;
+    for (const held of this.held.values()) if (held.tagged) tagged++;
+    return { knownEvidence: this.known.size, ceilings: this.ceilings.size, tagged };
   }
 
   /** Raw events from one layer's sidecar. */
@@ -228,6 +255,7 @@ export class Pipeline {
       serviceOf.set(masked.event.id, masked.event.service);
       eventById.set(masked.event.id, masked.event);
       this.remember(masked.event.id);
+      this.hold(masked.event);
       for (const [kind, n] of Object.entries(masked.report) as [keyof MaskReport, number][]) {
         report.masked[kind] = (report.masked[kind] ?? 0) + n;
       }
@@ -319,8 +347,10 @@ export class Pipeline {
   /**
    * A proposal from an investigator or its panel. The pipeline tells the gate
    * which of the cited evidence exists and what ceiling each advisory record
-   * allows, as they stand now. The executor keeps that snapshot, so a proposal
-   * that waits for a human is judged on what was known when it was made.
+   * allows, as they stand now, and how each cited event holds the proposal's
+   * target: in a field the sidecar read from the host, in one the client wrote,
+   * or in an event that does not say. The executor keeps that snapshot, so a
+   * proposal that waits for a human is judged on what was known when it was made.
    */
   async submit(raw: unknown): Promise<SubmitResult> {
     const cited = citedEvidence(raw);
@@ -330,7 +360,7 @@ export class Pipeline {
       const ceiling = this.ceilings.get(id);
       if (ceiling !== undefined) ceilings.set(id, ceiling);
     }
-    return this.executor.submit(raw, { knownEvidenceIds, ceilings });
+    return this.executor.submit(raw, { knownEvidenceIds, ceilings, targetSupport: this.targetSupport(raw, knownEvidenceIds) });
   }
 
   // ---- internals ----
@@ -369,7 +399,44 @@ export class Pipeline {
       if (oldest.done === true) break;
       this.known.delete(oldest.value);
       this.ceilings.delete(oldest.value);
+      this.held.delete(oldest.value);
     }
+  }
+
+  /** Keep what an event holds, by who wrote it. The latest copy of an event wins. */
+  private hold(event: GuardDogEvent): void {
+    if (event.clientWritten === undefined) {
+      this.held.set(event.id, UNTAGGED);
+      return;
+    }
+    const written = new Set(event.clientWritten);
+    const client = new Set<string>();
+    const observed = new Set<string>();
+    for (const [name, value] of Object.entries(event.attrs)) {
+      if (typeof value !== 'string' || value.length > MAX_HELD_VALUE) continue;
+      (written.has(name) ? client : observed).add(value);
+    }
+    this.held.set(event.id, { tagged: true, client, observed });
+  }
+
+  /**
+   * For each cited event the pipeline remembers, how it holds the target the raw
+   * proposal names. Equality, not substring: an address typed into a file name is
+   * not the file's address, and the file name as a whole is what the sidecar saw.
+   * An event that holds the target in no field is left out.
+   */
+  private targetSupport(raw: unknown, cited: Iterable<string>): Map<string, TargetSupport> {
+    const support = new Map<string, TargetSupport>();
+    const target = typeof raw === 'object' && raw !== null ? (raw as { target?: unknown }).target : undefined;
+    if (typeof target !== 'string') return support;
+    for (const id of cited) {
+      const held = this.held.get(id);
+      if (held === undefined) continue;
+      if (!held.tagged) support.set(id, 'unknown');
+      else if (held.observed.has(target)) support.set(id, 'observed');
+      else if (held.client.has(target)) support.set(id, 'client');
+    }
+    return support;
   }
 
   /** The latest copy of a record wins. A record that is later verified raises its ceiling; one that changes the other way lowers it. */

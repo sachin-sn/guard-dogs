@@ -15,6 +15,7 @@ import {
   webrootNewExecutable,
   type AuditEntry,
   type ControlAdapter,
+  type GatePolicyInput,
   type Notification,
   type PipelineOptions,
   type ProposedAction,
@@ -100,7 +101,7 @@ function containment(overrides: Partial<ProposedAction> = {}): ProposedAction {
   };
 }
 
-function setup(options: Partial<PipelineOptions> = {}, failAudit = false) {
+function setup(options: Partial<PipelineOptions> = {}, failAudit = false, gate: Partial<GatePolicyInput> = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gd-pipe-'));
   dirs.push(dir);
   const clock = new Clock();
@@ -114,12 +115,14 @@ function setup(options: Partial<PipelineOptions> = {}, failAudit = false) {
       preApproved: { 'contain.rate-limit': { maxTtlSeconds: 3600, targets: ['shop-web:*'] } },
       protectedTargets: ['guard-dog:*'],
       approvers: ['alice'],
+      ...gate,
     }),
     log,
     adapters: {
       'observe.raise-sampling': observer,
       'contain.rate-limit': adapter,
       'contain.block-source': adapter,
+      'contain.quarantine-file': adapter,
     },
     notifier: { notify: (n) => void sent.push(n) },
     clock: clock.now,
@@ -535,10 +538,10 @@ describe('pipeline: advisories', () => {
   it('forgets the ceiling of a record when it forgets the record', async () => {
     const { pipeline } = setup({ maxKnownEvidence: 3 });
     await pipeline.ingestAdvisories([record({ id: 'GD-1' }), record({ id: 'GD-2' }), record({ id: 'GD-3' })]);
-    expect(pipeline.stats()).toEqual({ knownEvidence: 3, ceilings: 3 });
+    expect(pipeline.stats()).toEqual({ knownEvidence: 3, ceilings: 3, tagged: 0 });
 
     await pipeline.ingestEvents(Array.from({ length: 5 }, () => raw({ path: '/x' })));
-    expect(pipeline.stats()).toEqual({ knownEvidence: 3, ceilings: 0 });
+    expect(pipeline.stats()).toEqual({ knownEvidence: 3, ceilings: 0, tagged: 0 });
     expect(pipeline.knowsEvidence('GD-1')).toBe(false);
   });
 });
@@ -605,5 +608,168 @@ describe('pipeline: proposals from investigators', () => {
     for (const junk of [null, 'x', 42, {}, { evidence: 'not-a-list' }, { evidence: [1, null, {}] }, { evidence: Array(500).fill('e') }]) {
       expect((await pipeline.submit(junk)).status).toBe('denied');
     }
+  });
+});
+
+describe('pipeline: where a containment\'s target came from', () => {
+  const ADDRESS = '203.0.113.50';
+  const token = createMasker({ pseudonymKey: 'k'.repeat(32) }).maskText(ADDRESS).text;
+  const blockable = { 'contain.block-source': { maxTtlSeconds: 1800, targets: ['ip_*'] } } as const;
+  const quarantinable = { 'contain.quarantine-file': { maxTtlSeconds: 1800, targets: ['/var/www/html/*'] } } as const;
+  const preApproved = { 'contain.rate-limit': { maxTtlSeconds: 3600, targets: ['shop-web:*'] }, ...blockable, ...quarantinable };
+  const block = (evidence: string[], overrides: Partial<ProposedAction> = {}) =>
+    containment({ kind: 'contain.block-source', target: token, evidence, ...overrides });
+  const upload = (attrs: Record<string, string | number | boolean>, clientWritten?: string[], id?: string) =>
+    raw({ path: '/var/www/html/uploads/banner-77.php', actor: 'www-data', ...attrs }, {
+      ...(clientWritten === undefined ? {} : { clientWritten }),
+      ...(id === undefined ? {} : { id }),
+    });
+
+  it('holds a block of an address that only a field the client writes holds, and tells a person why', async () => {
+    const { pipeline, adapter, sent } = setup({}, false, { preApproved });
+    const event = upload({ client_ip: ADDRESS }, ['client_ip']);
+    await pipeline.ingestEvents([event]);
+
+    const result = await pipeline.submit(block([event.id]));
+    expect(result.status).toBe('pending-human');
+    expect(result.decision?.codes).toEqual(expect.arrayContaining(['client-written-target', 'panel-approved']));
+    expect(adapter.applied).toEqual([]);
+    expect(sent.filter((n) => n.kind === 'unverified-target')).toHaveLength(1);
+    expect(sent.find((n) => n.kind === 'unverified-target')?.summary).toMatch(/^Review needed: .*rests on a field the client writes/);
+  });
+
+  it('runs the same block when the address came from a field the sidecar read from the host', async () => {
+    const { pipeline, adapter, sent } = setup({}, false, { preApproved });
+    const event = upload({ client_ip: ADDRESS }, []);
+    await pipeline.ingestEvents([event]);
+
+    expect((await pipeline.submit(block([event.id]))).status).toBe('applied');
+    expect(adapter.applied).toEqual(['act-1']);
+    expect(sent.map((n) => n.kind)).not.toContain('unverified-target');
+  });
+
+  it('lets a host-supplied field in another cited event support it', async () => {
+    const { pipeline } = setup({}, false, { preApproved });
+    const forged = upload({ client_ip: ADDRESS }, ['client_ip'], 'evt-forged');
+    const socket = upload({ peer: ADDRESS }, ['referer'], 'evt-socket');
+    await pipeline.ingestEvents([forged, socket]);
+
+    expect((await pipeline.submit(block(['evt-forged', 'evt-socket']))).status).toBe('applied');
+  });
+
+  it('counts a host-supplied field of the same event that holds the address too, whatever else holds it', async () => {
+    const { pipeline } = setup({}, false, { preApproved });
+    const event = upload({ client_ip: ADDRESS, peer: ADDRESS }, ['client_ip']);
+    await pipeline.ingestEvents([event]);
+
+    expect((await pipeline.submit(block([event.id]))).status).toBe('applied');
+  });
+
+  it('does not take an address typed into a file name for the file\'s own: the file stays containable, the address does not', async () => {
+    const { pipeline, adapter } = setup({}, false, { preApproved });
+    // The masker turns the address in the name into the same token the client_ip field holds.
+    const event = raw({ path: `/var/www/html/uploads/${ADDRESS}-vote-approve.php`, actor: 'www-data', client_ip: ADDRESS }, { clientWritten: ['client_ip'] });
+    await pipeline.ingestEvents([event]);
+    const quarantined = (await pipeline.submit(containment({ id: 'act-q', kind: 'contain.quarantine-file', target: `/var/www/html/uploads/${token}-vote-approve.php`, evidence: [event.id] })));
+    const blocked = await pipeline.submit(block([event.id], { id: 'act-b' }));
+
+    expect(quarantined.status).toBe('applied');
+    expect(blocked.status).toBe('pending-human');
+    expect(blocked.decision?.codes).toContain('client-written-target');
+    expect(adapter.applied).toEqual(['act-q']);
+  });
+
+  it('leaves a containment alone when no cited event holds its target in a field', async () => {
+    const { pipeline } = setup({}, false, { preApproved });
+    const event = upload({ client_ip: ADDRESS }, ['client_ip']);
+    await pipeline.ingestEvents([event]);
+
+    expect((await pipeline.submit(containment({ evidence: [event.id] }))).status).toBe('applied');
+  });
+
+  it('does not look at events that do not say, unless policy needs them to', async () => {
+    const event = upload({ client_ip: ADDRESS });
+    const lax = setup({}, false, { preApproved });
+    await lax.pipeline.ingestEvents([event]);
+    expect((await lax.pipeline.submit(block([event.id]))).status).toBe('applied');
+
+    const strict = setup({}, false, { preApproved, requireTargetProvenance: true });
+    await strict.pipeline.ingestEvents([event]);
+    const held = await strict.pipeline.submit(block([event.id]));
+    expect(held.status).toBe('pending-human');
+    expect(held.decision?.codes).toContain('target-provenance-unknown');
+    expect(strict.adapter.applied).toEqual([]);
+    expect(strict.sent.map((n) => n.kind)).toContain('unverified-target');
+  });
+
+  it('does not hold a containment under that policy for citing an advisory record, which is not an event', async () => {
+    const { pipeline } = setup({}, false, { preApproved, requireTargetProvenance: true });
+    await pipeline.ingestAdvisories([record({ verification: verified() })]);
+    expect((await pipeline.submit(containment())).status).toBe('applied');
+  });
+
+  it('a person can clear the hold, and the approval runs the block', async () => {
+    const { pipeline, executor, adapter, clock } = setup({}, false, { preApproved });
+    const event = upload({ client_ip: ADDRESS }, ['client_ip']);
+    await pipeline.ingestEvents([event]);
+    const action = block([event.id]);
+    expect((await pipeline.submit(action)).status).toBe('pending-human');
+
+    const approved = await executor.approve(action.id, { approver: 'alice', approvedAt: clock.now().toISOString(), actionDigest: actionDigest(action) });
+    expect(approved.status).toBe('applied');
+    expect(adapter.applied).toEqual(['act-1']);
+  });
+
+  it('judges a waiting proposal on how the events held its target when it was made', async () => {
+    const { pipeline, executor, adapter, clock } = setup({ maxKnownEvidence: 3 }, false, { preApproved });
+    const event = upload({ client_ip: ADDRESS }, ['client_ip']);
+    await pipeline.ingestEvents([event]);
+    const action = block([event.id]);
+    expect((await pipeline.submit(action)).status).toBe('pending-human');
+
+    await pipeline.ingestEvents(Array.from({ length: 5 }, () => raw({ path: '/x' })));
+    expect(pipeline.knowsEvidence(event.id)).toBe(false);
+    const approved = await executor.approve(action.id, { approver: 'alice', approvedAt: clock.now().toISOString(), actionDigest: actionDigest(action) });
+    expect(approved.status).toBe('applied');
+    expect(adapter.applied).toEqual(['act-1']);
+  });
+
+  it('forgets what an event held when it forgets the event, and counts the tagged ones', async () => {
+    const { pipeline } = setup({ maxKnownEvidence: 4 });
+    await pipeline.ingestEvents([upload({ client_ip: ADDRESS }, ['client_ip']), upload({ client_ip: ADDRESS }, []), upload({ client_ip: ADDRESS })]);
+    expect(pipeline.stats()).toEqual({ knownEvidence: 3, ceilings: 0, tagged: 2 });
+
+    await pipeline.ingestEvents(Array.from({ length: 4 }, () => raw({ path: '/x' })));
+    expect(pipeline.stats()).toEqual({ knownEvidence: 4, ceilings: 0, tagged: 0 });
+  });
+
+  it('keeps the latest copy of an event: a copy that does not say replaces one that did', async () => {
+    const { pipeline } = setup();
+    await pipeline.ingestEvents([upload({ client_ip: ADDRESS }, ['client_ip'], 'evt-same')]);
+    expect(pipeline.stats().tagged).toBe(1);
+    await pipeline.ingestEvents([upload({ client_ip: ADDRESS }, undefined, 'evt-same')]);
+    expect(pipeline.stats()).toMatchObject({ knownEvidence: 1, tagged: 0 });
+  });
+
+  it('shows the tag on the masked event it hands back with a hit', async () => {
+    const { pipeline } = setup();
+    const report = await pipeline.ingestEvents([upload({ client_ip: ADDRESS }, ['client_ip'])]);
+    expect(report.flagged[0]?.event.clientWritten).toEqual(['client_ip']);
+    expect(String(report.flagged[0]?.event.attrs['client_ip'])).toBe(token);
+  });
+
+  it('refuses an event whose tag is not a list of attribute names, and says nothing of its values', async () => {
+    const { pipeline } = setup();
+    const bad: unknown[] = ['client_ip', [1], [''], ['a', 'a'], Array.from({ length: 65 }, (_, i) => `n${i}`), ['x'.repeat(65)], {}, null];
+    const report = await pipeline.ingestEvents(bad.map((clientWritten) => upload({ client_ip: ADDRESS }, clientWritten as string[])));
+    expect(report.rejected).toBe(bad.length);
+    expect(report.accepted).toBe(0);
+    expect(JSON.stringify(report.rejectedSamples)).not.toContain(ADDRESS);
+  });
+
+  it('accepts a tag that names a field the event does not have', async () => {
+    const { pipeline } = setup();
+    const report = await pipeline.ingestEvents([upload({ client_ip: ADDRESS }, ['no-such-field'])]);
+    expect(report.accepted).toBe(1);
   });
 });
