@@ -790,14 +790,14 @@ export function renderMeasured(measured: Measured, chosen: Plan, participants: r
       });
       if (wrongBy.length > 0) spots.push(`  ${(names.get(entry.id) as VoteCase).scenario} (${entry.label}, ${entry.source}, ${entry.view} view): wrong ${wrongBy.join(', ')}`);
     }
-    lines.push('', spots.length === 0 ? 'No wrong votes on any case.' : `Cases with wrong votes (${spots.length}):`, ...spots.slice(0, 15));
-    if (spots.length > 15) lines.push(`  and ${spots.length - 15} more`);
+    lines.push('', spots.length === 0 ? 'No wrong votes on any case.' : `Cases with wrong votes (${spots.length}):`, ...capped(spots));
 
     lines.push('', 'INVESTIGATIONS. right: the scenario\'s own containment. none: nothing proposed. other: offered, not the written answer. forbidden: a target no proposal may name.');
     for (const participant of large) {
       const tally = tallyInvestigations(measured.investigations.filter((record) => record.model === participant.name));
       lines.push(`  ${participant.name.padEnd(14)} ${plural(tally.calls, 'call')}: right ${tally.right}, none ${tally.none}, other ${tally.other}, forbidden ${tally.forbidden}, unoffered ${tally.unoffered}, no answer ${tally.failed}`);
     }
+    lines.push(...renderInvestigationMisses(measured, chosen, large));
   }
 
   if (small.length > 0) {
@@ -806,6 +806,7 @@ export function renderMeasured(measured: Measured, chosen: Plan, participants: r
       const tally = tallyTriage(measured.triage.filter((record) => record.model === participant.name));
       lines.push(`  ${participant.name.padEnd(14)} ${plural(tally.items, 'item')}: right ${tally.right}, missed ${tally.missed}, needless ${tally.needless}, silent ${tally.silent}`);
     }
+    lines.push(...renderTriageMisses(measured, chosen, small));
   }
 
   lines.push(...renderFailures(measured, participants));
@@ -823,6 +824,56 @@ export function renderMeasured(measured: Measured, chosen: Plan, participants: r
   }
   if (families.length > 0) lines.push(...renderRates(measured, families), ...renderPanels(measured, families), ...renderIndependence(measured, families));
   return lines;
+}
+
+/** At most 15 lines, then how many were left out. */
+function capped(spots: readonly string[]): string[] {
+  return [...spots.slice(0, 15), ...(spots.length > 15 ? [`  and ${spots.length - 15} more`] : [])];
+}
+
+/** Which triage requests a model got wrong, so that "needless 6" can be traced to the items. */
+function renderTriageMisses(measured: Measured, chosen: Plan, small: readonly Participant[]): string[] {
+  let answeredAny = false;
+  const spots: string[] = [];
+  for (const entry of chosen.triage) {
+    const wrongBy = small.flatMap((participant) => {
+      const answered = measured.triage.filter((record) => record.model === participant.name && record.caseId === entry.id && (record.outcome === 'escalate' || record.outcome === 'routine'));
+      if (answered.length > 0) answeredAny = true;
+      const wrong = answered.filter((record) => record.outcome !== record.expected).length;
+      return wrong > 0 ? [`${participant.name} ${wrong}/${answered.length}`] : [];
+    });
+    if (wrongBy.length === 0) continue;
+    const wanted = new Set(Object.values(entry.expected));
+    const should = wanted.size > 1 ? 'mixed' : wanted.has('escalate') ? 'should escalate' : 'should be routine';
+    spots.push(`  ${entry.scenario} (${should}, ${entry.category}): wrong ${wrongBy.join(', ')}`);
+  }
+  if (!answeredAny) return [];
+  return ['', spots.length === 0 ? 'Every triage item was called right.' : `Triage items called wrongly (${spots.length}):`, ...capped(spots)];
+}
+
+/**
+ * Which investigations did not land where they should: a proposal on a harmless
+ * scenario, or on an attack anything other than its written containment (including
+ * nothing at all, which leaves the attack alone).
+ */
+function renderInvestigationMisses(measured: Measured, chosen: Plan, large: readonly Participant[]): string[] {
+  let answeredAny = false;
+  const spots: string[] = [];
+  for (const entry of chosen.investigations) {
+    const expected: InvestigationOutcome = entry.category === 'noise' ? 'none' : 'right';
+    const wrongBy = large.flatMap((participant) => {
+      const answered = measured.investigations.filter((record) => record.model === participant.name && record.caseId === entry.id && record.outcome !== 'failed');
+      if (answered.length > 0) answeredAny = true;
+      const wrong = answered.filter((record) => record.outcome !== expected);
+      if (wrong.length === 0) return [];
+      const kinds = new Map<string, number>();
+      for (const record of wrong) kinds.set(record.outcome, (kinds.get(record.outcome) ?? 0) + 1);
+      return [`${participant.name} ${wrong.length}/${answered.length} (${[...kinds].map(([kind, count]) => `${kind} x${count}`).join(', ')})`];
+    });
+    if (wrongBy.length > 0) spots.push(`  ${entry.scenario} (should be ${expected}, ${entry.category}): ${wrongBy.join(', ')}`);
+  }
+  if (!answeredAny) return [];
+  return ['', spots.length === 0 ? 'Every investigation landed where it should.' : `Investigations that did not land where they should (${spots.length}):`, ...capped(spots)];
 }
 
 function byFamily(measured: Measured, families: readonly string[], label: Label): Record<string, Inputs> {
