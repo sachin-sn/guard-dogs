@@ -52,10 +52,12 @@ const MAX_NOTE = 1000;
 
 /** The instructions with one more paragraph, before the line that says how to reply. */
 export function systemPromptWith(note: string): string {
-  if (typeof note !== 'string' || note.trim().length === 0 || note.length > MAX_NOTE) {
+  // The cap bounds what reaches the prompt, so it counts the text without its padding.
+  const text = typeof note === 'string' ? note.trim() : '';
+  if (text.length === 0 || text.length > MAX_NOTE) {
     throw new RangeError(`the system note must be 1 to ${MAX_NOTE} characters`);
   }
-  return `${PROMPT_BODY}\n\n${note.trim()}\n\n${PROMPT_REPLY}`;
+  return `${PROMPT_BODY}\n\n${text}\n\n${PROMPT_REPLY}`;
 }
 
 export interface VotePrompt {

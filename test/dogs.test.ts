@@ -300,6 +300,9 @@ describe('the note about attributes the client wrote', () => {
   it('is trimmed, and must be text of 1 to 1000 characters', () => {
     expect(systemPromptWith('  Use care.  ')).toBe(systemPromptWith('Use care.'));
     expect(systemPromptWith('x'.repeat(1000))).toContain('x'.repeat(1000));
+    // The cap counts the text that is sent, not the padding around it.
+    expect(systemPromptWith(`  \n${'x'.repeat(1000)}\n  `)).toBe(systemPromptWith('x'.repeat(1000)));
+    expect(() => systemPromptWith(`  ${'x'.repeat(1001)}  `)).toThrow(/system note must be 1 to 1000 characters/);
     for (const bad of ['', '   ', '\n', 'x'.repeat(1001), undefined, null, 7, ['a']]) {
       expect(() => systemPromptWith(bad as unknown as string), JSON.stringify(bad)).toThrow(/system note must be 1 to 1000 characters/);
     }
