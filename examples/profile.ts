@@ -7,6 +7,7 @@
  *   npm run profile -- --run --only anthropic
  *   npm run profile -- --run --only gemini --min-gap-ms 15000
  *   npm run profile -- --run --votes 16 --investigations 0 --triage 0 --all-views
+ *   npm run profile -- --run --votes 0 --investigations 0 --triage 0 --controls --runs 5
  *
  * This spends API credit, so nothing is sent without `--run`, and the plan is
  * refused if it is bigger than `--max-calls` (default 300). The default plan is
@@ -27,6 +28,12 @@
  * only the one the plan gave it, and adds a VIEWS section to the report. A note
  * that one view carries is then told apart from one that all of them carry.
  * Those extra calls come on top of the default plan and are counted in it.
+ *
+ * `--controls` asks the controls (see `eval/controls.ts`): the forbidden block
+ * on the address the event records, with the text an attacker planted beside it
+ * and with nothing planted, and with the reason it came with and a plain one.
+ * It adds a CONTROL section that tells the planted text from the address.
+ * Like `--all-views`, the extra calls are counted in the plan, and no rate moves.
  *
  * Run `npm run live-check` first: a profile on a model that does not answer
  * measures the outage.
@@ -68,6 +75,7 @@ export async function main(
     triage: whole(args, '--triage', 0) ?? DEFAULT_LIMITS.triage,
     runs: whole(args, '--runs', 1) ?? DEFAULT_LIMITS.runs,
     ...(args.includes('--all-views') ? { allViews: true } : {}),
+    ...(args.includes('--controls') ? { controls: true } : {}),
   };
   if (limits.runs > MAX_RUNS) throw new RangeError(`--runs is at most ${MAX_RUNS}`);
   const maxCalls = whole(args, '--max-calls', 1) ?? DEFAULT_MAX_CALLS;
@@ -109,7 +117,7 @@ export async function main(
   for (const line of renderPlan(chosen, participants)) print(line);
   if (minGapMs !== undefined && minGapMs > 0) {
     // The longest queue: a large model's votes and investigations, or a small model's triage requests, once for each run.
-    const longest = Math.max(large > 0 ? (chosen.votes.length + chosen.variants.length + chosen.investigations.length) * limits.runs : 0, participants.length > large ? chosen.triage.length * limits.runs : 0);
+    const longest = Math.max(large > 0 ? (chosen.votes.length + chosen.variants.length + chosen.controls.length + chosen.investigations.length) * limits.runs : 0, participants.length > large ? chosen.triage.length * limits.runs : 0);
     print(`  pacing:         at least ${minGapMs} ms between one model's calls, so the slowest model takes at least ${Math.ceil((longest * minGapMs) / 60_000)} minutes`);
   }
   if (calls > maxCalls) {
