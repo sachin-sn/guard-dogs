@@ -343,6 +343,8 @@ export interface Participant {
   /** Large models vote and investigate; small ones triage, as in the system. */
   tier: 'small' | 'large';
   client: ModelClient;
+  /** The name the provider knows the model by, such as `claude-haiku-5-5`: what makes a result attributable. */
+  api?: string;
 }
 
 export type VoteOutcome = 'approve' | 'reject' | 'abstain' | 'failed';
@@ -382,9 +384,24 @@ export interface Measured {
   triage: TriageRecord[];
 }
 
+/** The clock the pacing uses; tests pass their own. */
+export interface Clock {
+  now(): number;
+  sleep(ms: number): Promise<void>;
+}
+
+const realClock: Clock = { now: () => Date.now(), sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)) };
+
 export interface MeasureOptions {
   /** Longest one call may take. Default 60,000. */
   timeoutMs?: number;
+  /**
+   * The least time between the starts of two calls to the same model. Default 0.
+   * A provider that limits calls per minute answers a burst with HTTP 429 and the
+   * profile would record that as a silent dog: pace the calls to stay under it.
+   */
+  minGapMs?: number;
+  clock?: Clock;
   /** Called after every call with how many are done and how many there will be. */
   onProgress?: (done: number, total: number) => void;
 }
@@ -406,6 +423,9 @@ function classify(reply: string, entry: InvestigationCase): InvestigationOutcome
 
 export async function measure(participants: readonly Participant[], chosen: Plan, options: MeasureOptions = {}): Promise<Measured> {
   const timeoutMs = options.timeoutMs ?? 60_000;
+  const gapMs = options.minGapMs ?? 0;
+  if (!Number.isInteger(gapMs) || gapMs < 0) throw new RangeError('minGapMs must be a whole number, 0 or more');
+  const clock = options.clock ?? realClock;
   const result: Measured = { votes: [], investigations: [], triage: [] };
   const large = participants.filter((participant) => participant.tier === 'large').length;
   const small = participants.length - large;
@@ -420,10 +440,18 @@ export async function measure(participants: readonly Participant[], chosen: Plan
   await Promise.all(
     participants.map(async (participant) => {
       const who = (run: number): Who => ({ model: participant.name, family: participant.family, run });
+      let earliest = 0;
+      const pace = async (): Promise<void> => {
+        if (gapMs === 0) return;
+        const wait = earliest - clock.now();
+        if (wait > 0) await clock.sleep(wait);
+        earliest = clock.now() + gapMs;
+      };
       for (let run = 1; run <= chosen.runs; run++) {
         if (participant.tier === 'large') {
           for (const entry of chosen.votes) {
             const dog = new ModelDog({ id: 'profile', evidenceView: entry.view, client: participant.client });
+            await pace();
             try {
               const opinion = await dog.review(structuredClone(entry.task), AbortSignal.timeout(timeoutMs));
               result.votes.push({ ...who(run), caseId: entry.id, label: entry.label, outcome: opinion.decision });
@@ -433,6 +461,7 @@ export async function measure(participants: readonly Participant[], chosen: Plan
             finished();
           }
           for (const entry of chosen.investigations) {
+            await pace();
             try {
               const reply = await participant.client.complete(entry.request, AbortSignal.timeout(timeoutMs));
               result.investigations.push({ ...who(run), caseId: entry.id, category: entry.category, outcome: classify(reply, entry) });
@@ -444,6 +473,7 @@ export async function measure(participants: readonly Participant[], chosen: Plan
         } else {
           for (const entry of chosen.triage) {
             const ids = Object.keys(entry.expected);
+            await pace();
             try {
               const reply = await participant.client.complete(entry.request, AbortSignal.timeout(timeoutMs));
               const answers = parseTriageReply(reply, new Set(ids));
@@ -640,6 +670,69 @@ export function tallyTriage(records: readonly TriageRecord[]): TriageTally {
   return tally;
 }
 
+// ---- calls that got no answer -------------------------------------------------------------
+
+export interface CallHealth {
+  /** Calls made to the model. A triage request about several items is one call. */
+  calls: number;
+  /** Calls that got no usable answer. */
+  failed: number;
+  /** Why, by kind, such as `http 429`. */
+  kinds: ReadonlyMap<string, number>;
+}
+
+/** A model whose calls mostly failed is measuring an outage or a rate limit, not itself. */
+export function mostlyFailed(health: CallHealth): boolean {
+  return health.failed * 2 > health.calls;
+}
+
+export function callHealth(measured: Measured, model: string): CallHealth {
+  const calls = new Map<string, string | undefined>();
+  for (const [kind, list] of [
+    ['vote', measured.votes],
+    ['investigation', measured.investigations],
+    ['triage', measured.triage],
+  ] as const) {
+    for (const record of list) {
+      if (record.model !== model) continue;
+      // A triage request about several items leaves one record per item: it is still one call.
+      const key = `${kind}|${record.run}|${record.caseId}`;
+      if (!calls.has(key)) calls.set(key, record.failure);
+    }
+  }
+  const kinds = new Map<string, number>();
+  let failed = 0;
+  for (const failure of calls.values()) {
+    if (failure === undefined) continue;
+    failed++;
+    kinds.set(failure, (kinds.get(failure) ?? 0) + 1);
+  }
+  return { calls: calls.size, failed, kinds };
+}
+
+function renderFailures(measured: Measured, participants: readonly Participant[]): string[] {
+  const health = participants.map((participant) => ({ participant, health: callHealth(measured, participant.name) })).filter((entry) => entry.health.failed > 0);
+  if (health.length === 0) return [];
+  const lines = [
+    '',
+    'CALLS THAT GOT NO ANSWER, by kind. http NNN: the provider answered with that status (429 is a rate limit, 503 is overload). network: no answer in time, or the connection failed. output, response: an answer that could not be read.',
+  ];
+  const seen = new Set<string>();
+  for (const { participant, health: value } of health) {
+    const kinds = [...value.kinds.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    for (const [kind] of kinds) seen.add(kind);
+    lines.push(`  ${participant.name.padEnd(14)} ${value.failed} of ${plural(value.calls, 'call')}: ${kinds.map(([kind, count]) => `${kind} x${count}`).join(', ')}`);
+  }
+  for (const { participant, health: value } of health) {
+    if (mostlyFailed(value)) lines.push(`  ${participant.name} failed on most of its calls, so its rows above describe that, not the model.`);
+  }
+  if (seen.has('http 429')) lines.push('  http 429 is the provider limiting how fast calls arrive. Add --min-gap-ms (15000 keeps one model to about 4 calls a minute) and run again.');
+  if (seen.has('network')) lines.push('  network can be a timeout: --timeout-ms 120000 allows two minutes for each call.');
+  if (seen.has('output')) lines.push('  output: the answer was cut off or empty. A model that reasons before it answers can use up the whole output limit doing so: try --max-output-tokens 4096.');
+  if (seen.has('refused')) lines.push('  refused: the provider declined or blocked the request. That is about using that provider on this text, not about speed.');
+  return lines;
+}
+
 // ---- the report --------------------------------------------------------------------------
 
 const pct = (value: number): string => `${Math.round(value * 1000) / 10}%`;
@@ -656,6 +749,9 @@ export function renderPlan(chosen: Plan, participants: readonly Participant[]): 
   const votes = (label: Label): number => chosen.votes.filter((entry) => entry.label === label).length;
   const lines = [
     `  models: ${participants.map((participant) => `${participant.name} (${participant.tier})`).join(', ')}`,
+    ...(participants.some((participant) => participant.api !== undefined)
+      ? [`  model names:    ${participants.map((participant) => `${participant.name} = ${participant.api ?? 'unknown'}`).join(', ')}`]
+      : []),
     `  votes:          ${plural(chosen.votes.length, 'case')} (${plural(votes('good'), 'good proposal')}, ${plural(votes('bad'), 'bad one')}), asked of each large model`,
     `  investigations: ${plural(chosen.investigations.length, 'case')}, asked of each large model`,
     `  triage:         ${plural(chosen.triage.length, 'request')}, asked of each small model`,
@@ -712,7 +808,19 @@ export function renderMeasured(measured: Measured, chosen: Plan, participants: r
     }
   }
 
-  const families = [...new Set(large.map((participant) => participant.family))];
+  lines.push(...renderFailures(measured, participants));
+
+  // A family whose large model mostly failed would show up as a model that never votes: leave it out of the tables.
+  const all = [...new Set(large.map((participant) => participant.family))];
+  const failing = all.filter((family) => large.some((participant) => participant.family === family && mostlyFailed(callHealth(measured, participant.name))));
+  const families = all.filter((family) => !failing.includes(family));
+  if (failing.length > 0) {
+    lines.push(
+      '',
+      `Left out of the tables below: ${failing.join(', ')}, because ${failing.length === 1 ? 'its large model' : 'their large models'} failed on most calls. ` +
+        (families.length === 0 ? 'Nothing is left to tabulate.' : 'The independence check and the pair panels need two families that both answered: fix that and run both again.'),
+    );
+  }
   if (families.length > 0) lines.push(...renderRates(measured, families), ...renderPanels(measured, families), ...renderIndependence(measured, families));
   return lines;
 }

@@ -5,6 +5,7 @@
  *   npm run profile -- --run             send the calls and print the report
  *   npm run profile -- --run --runs 5 --json profile.json
  *   npm run profile -- --run --only anthropic
+ *   npm run profile -- --run --only gemini --min-gap-ms 15000
  *
  * This spends API credit, so nothing is sent without `--run`, and the plan is
  * refused if it is bigger than `--max-calls` (default 300). The default plan is
@@ -17,17 +18,22 @@
  * same variables as `npm run live-check`, a provider without one is skipped, and
  * a key is only ever placed in a request header.
  *
+ * A provider that limits calls per minute (free keys often do) answers a burst
+ * with HTTP 429, and the report would show a model that never answers. The report
+ * says so, by kind; `--min-gap-ms` spaces one model's calls to stay under it.
+ *
  * Run `npm run live-check` first: a profile on a model that does not answer
  * measures the outage.
  */
 
 import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { collectCases, callCount, plan, renderMeasured, renderPlan, DEFAULT_LIMITS, MAX_RUNS, measure, type Limits, type Participant } from '../eval/live.js';
+import { collectCases, callCount, callHealth, plan, renderMeasured, renderPlan, DEFAULT_LIMITS, MAX_RUNS, measure, type Limits, type Participant } from '../eval/live.js';
 import { PROVIDERS, loadDotEnv, targetsFromEnv, type Provider } from './live-check.js';
 import type { TransportOptions } from '../src/index.js';
 
 const DEFAULT_MAX_CALLS = 300;
+const MAX_GAP_MS = 300_000;
 
 function whole(args: readonly string[], name: string, min: number): number | undefined {
   const at = args.indexOf(name);
@@ -60,6 +66,8 @@ export async function main(
   const maxCalls = whole(args, '--max-calls', 1) ?? DEFAULT_MAX_CALLS;
   const maxOutputTokens = whole(args, '--max-output-tokens', 1);
   const timeoutMs = whole(args, '--timeout-ms', 1);
+  const minGapMs = whole(args, '--min-gap-ms', 0);
+  if (minGapMs !== undefined && minGapMs > MAX_GAP_MS) throw new RangeError(`--min-gap-ms is at most ${MAX_GAP_MS}`);
   const jsonAt = args.indexOf('--json');
   const jsonFile = jsonAt === -1 ? undefined : args[jsonAt + 1];
   if (jsonAt !== -1 && (jsonFile === undefined || jsonFile.startsWith('--'))) throw new RangeError('--json needs a file name');
@@ -84,6 +92,7 @@ export async function main(
     family: PROVIDERS[target.provider].family,
     tier: target.tier,
     client: target.client,
+    api: target.apiModel,
   }));
   const chosen = plan(await collectCases(), limits);
   const large = participants.filter((participant) => participant.tier === 'large').length;
@@ -91,6 +100,11 @@ export async function main(
 
   print('');
   for (const line of renderPlan(chosen, participants)) print(line);
+  if (minGapMs !== undefined && minGapMs > 0) {
+    // The longest queue: a large model's votes and investigations, or a small model's triage requests, once for each run.
+    const longest = Math.max(large > 0 ? (chosen.votes.length + chosen.investigations.length) * limits.runs : 0, participants.length > large ? chosen.triage.length * limits.runs : 0);
+    print(`  pacing:         at least ${minGapMs} ms between one model's calls, so the slowest model takes at least ${Math.ceil((longest * minGapMs) / 60_000)} minutes`);
+  }
   if (calls > maxCalls) {
     print('');
     print(`That is more than --max-calls ${maxCalls}. Lower --runs, --votes, --investigations or --triage, or raise --max-calls if you mean to spend it.`);
@@ -106,6 +120,7 @@ export async function main(
   let last = 0;
   const measured = await measure(participants, chosen, {
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    ...(minGapMs === undefined ? {} : { minGapMs }),
     onProgress: (done, total) => {
       if (done === total || done - last >= 25) {
         last = done;
@@ -117,11 +132,12 @@ export async function main(
 
   if (jsonFile !== undefined) {
     // Counts and outcomes only: what the models wrote is not kept.
-    fs.writeFileSync(jsonFile, `${JSON.stringify({ limits, calls, ...measured }, null, 2)}\n`);
+    const models = participants.map((participant) => ({ name: participant.name, family: participant.family, tier: participant.tier, api: participant.api }));
+    fs.writeFileSync(jsonFile, `${JSON.stringify({ limits, calls, models, ...measured }, null, 2)}\n`);
     print(`\nwrote ${jsonFile}`);
   }
-  const failed = measured.votes.filter((record) => record.outcome === 'failed').length + measured.investigations.filter((record) => record.outcome === 'failed').length + measured.triage.filter((record) => record.outcome === 'failed').length;
-  if (failed > 0) print(`\n${failed} calls got no usable answer. They count as silent dogs. If they are mostly one model, run npm run live-check and fix that first.`);
+  const failed = participants.reduce((sum, participant) => sum + callHealth(measured, participant.name).failed, 0);
+  if (failed > 0) print(`\n${failed} calls got no usable answer (by kind, above). They count as silent dogs, so fix the cause before reading the rates.`);
   return failed > 0 ? 1 : 0;
 }
 

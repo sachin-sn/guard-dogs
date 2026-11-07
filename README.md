@@ -92,10 +92,10 @@ flowchart LR
 | `examples/demo.ts` | **Offline demo.** The whole flow end to end with scripted stand-in dogs. Also run by the tests. | Tested |
 | `eval/` | **Evaluation testbed.** A labelled corpus of 21 attack, evasion, injection, noise and benign scenarios, run through the real stack with simulated models (including ones that do as the evidence says), scored, and varied to show who has to be fooled; plus an exact model of how risky a panel is by size and make-up (every way of voting, through the real gate). See [docs/evaluation.md](docs/evaluation.md). `npm run eval`, `npm run eval -- --risk`. | Tested; simulated models only |
 | `examples/live-check.ts` | **Live check.** Sends a few made-up cases (no real logs) to the Anthropic and Gemini models you configured and says whether the key, the model name and the answer format work, and whether each answer is the one a careful analyst would give. Only makes network calls when you run it. `npm run live-check`. | Tested against fakes. Run once against both providers: the Anthropic models and `gemini-3.5-flash-lite` worked, `gemini-3.8-flash` answered HTTP 503 on that run |
-| `examples/profile.ts`, `eval/live.ts` | **Live profile.** Sends labelled cases from the evaluation corpus (the real prompts the system builds, made-up data) to the Anthropic and Gemini models you configured, several times each, and counts how often a model gives no usable answer, how often it is wrong on a case most of the time (a blind spot) and how often it slips at random. Then it puts those rates into the exact panel-risk model, with the cautious end of a 95% interval beside the measured rate. It spends API credit, so it sends nothing without `--run` and refuses a plan over `--max-calls`. `npm run profile`. | Tested against fakes; no real run yet |
+| `examples/profile.ts`, `eval/live.ts` | **Live profile.** Sends labelled cases from the evaluation corpus (the real prompts the system builds, made-up data) to the Anthropic and Gemini models you configured, several times each, and counts how often a model gives no usable answer, how often it is wrong on a case most of the time (a blind spot) and how often it slips at random. Then it puts those rates into the exact panel-risk model, with the cautious end of a 95% interval beside the measured rate. It spends API credit, so it sends nothing without `--run` and refuses a plan over `--max-calls`. `npm run profile`. | One real run: Claude measured, Gemini calls failed (see docs/evaluation.md) |
 | `fixtures/` | Synthetic records, events and actions. Nothing here is a real advisory or a working exploit. | |
 
-Not built yet: the sidecar processes themselves (tailing logs and shipping events to the pipeline) and the probe patrol. The live profile is built but has not been run against real models, so every rate in the evaluation is still an assumption.
+Not built yet: the sidecar processes themselves (tailing logs and shipping events to the pipeline) and the probe patrol. The live profile has had one real run: it measured the Claude models on a small sample, and the Gemini calls failed, so the rates in the panel-risk tables are still assumptions.
 
 ## Quick start
 
@@ -144,6 +144,7 @@ Nothing calls a model or the network. The guard dogs in the demo are scripted st
    npm run profile                 # shows the plan and the number of calls; sends nothing
    npm run profile -- --run        # sends them and prints the report
    npm run profile -- --run --runs 5 --max-calls 400 --json profile.json
+   npm run profile -- --run --min-gap-ms 15000   # a provider that limits calls per minute: wait between one model's calls
    ```
 
    Each large model gets 16 votes and 8 investigations, each small model 10 triage requests, each asked 3 times. `--votes`, `--investigations`, `--triage` and `--runs` change that, and `--max-calls` (default 300) stops a plan that would cost more than you meant to spend. The JSON holds counts and outcomes only, never what a model wrote.
