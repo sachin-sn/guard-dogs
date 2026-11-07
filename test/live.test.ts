@@ -798,6 +798,125 @@ describe('counting', () => {
 describe('the report', () => {
   const chosen = plan(collected, { votes: 6, investigations: 2, triage: 2, runs: 2 });
 
+  describe('which triage items and investigations went wrong', () => {
+    const small = plan(collected, { votes: 0, investigations: 0, triage: 10, runs: 2 });
+    const large = plan(collected, { votes: 0, investigations: 8, triage: 0, runs: 2 });
+    const render = async (all: Participant[], chosenPlan: Plan): Promise<string[]> => renderMeasured(await measure(all, chosenPlan), chosenPlan, all);
+    const should = (expected: Readonly<Record<string, string>>): string => (Object.values(expected)[0] === 'escalate' ? 'should escalate' : 'should be routine');
+    /** What a careful analyst says, with every triage decision turned round. */
+    const flipped = (chosenPlan: Plan): Answer => {
+      const right = careful(chosenPlan);
+      return async (request, ask) => {
+        const reply = JSON.parse(await right(request, ask)) as { results: { id: string; decision: string }[] };
+        return JSON.stringify({ results: reply.results.map((entry) => ({ ...entry, decision: entry.decision === 'escalate' ? 'routine' : 'escalate', reason: 'scripted' })) });
+      };
+    };
+    const none: Answer = () => JSON.stringify({ decision: 'none', reason: 'scripted' });
+
+    it('says so when a careful analyst got every item and every investigation right', async () => {
+      const lines = await render([participant('claude-small', careful(small))], small);
+      expect(lines).toContain('Every triage item was called right.');
+      expect(lines.some((line) => line.startsWith('Triage items called wrongly'))).toBe(false);
+      const investigated = await render([participant('claude-large', careful(large))], large);
+      expect(investigated).toContain('Every investigation landed where it should.');
+      expect(investigated.some((line) => line.startsWith('Investigations that did not land'))).toBe(false);
+    });
+
+    it('lists each triage request a model got wrong, with what it should have been, and how many of the answers were wrong', async () => {
+      const lines = await render([participant('claude-small', flipped(small)), participant('gemini-small', careful(small))], small);
+      expect(lines).toContain(`Triage items called wrongly (${small.triage.length}):`);
+      for (const entry of small.triage) expect(lines, entry.scenario).toContain(`  ${entry.scenario} (${should(entry.expected)}, ${entry.category}): wrong claude-small 2/2`);
+      expect(lines.filter((line) => line.includes('gemini-small 2/2'))).toEqual([]);
+      const both = await render([participant('claude-small', flipped(small)), participant('gemini-small', flipped(small))], small);
+      for (const entry of small.triage) expect(both, entry.scenario).toContain(`  ${entry.scenario} (${should(entry.expected)}, ${entry.category}): wrong claude-small 2/2, gemini-small 2/2`);
+    });
+
+    it('counts a wrong answer in one run of two as 1 of 2, and leaves out the cases a model got right', async () => {
+      const turn = flipped(small);
+      const right = careful(small);
+      const once = participant('claude-small', (request, ask) => (ask.call <= small.triage.length ? turn(request, ask) : right(request, ask)));
+      const lines = await render([once], small);
+      for (const entry of small.triage) expect(lines, entry.scenario).toContain(`  ${entry.scenario} (${should(entry.expected)}, ${entry.category}): wrong claude-small 1/2`);
+      const half = participant('claude-small', (request, ask) => (small.triage.findIndex((entry) => entry.request.user === request.user) % 2 === 0 ? turn(request, ask) : right(request, ask)));
+      const listed = (await render([half], small)).filter((line) => / wrong claude-small /.test(line));
+      expect(listed).toHaveLength(Math.ceil(small.triage.length / 2));
+    });
+
+    it('calls a request that holds both kinds of item mixed', async () => {
+      const entry = small.triage[0] as (typeof small.triage)[number];
+      const mixed: Plan = { ...small, runs: 1, triage: [{ ...entry, expected: { a: 'escalate', b: 'routine' } }] };
+      const answer = participant('claude-small', () => JSON.stringify({ results: [{ id: 'a', decision: 'routine', reason: 'x' }, { id: 'b', decision: 'routine', reason: 'x' }] }));
+      const lines = await render([answer], mixed);
+      expect(lines).toContain('Triage items called wrongly (1):');
+      expect(lines).toContain(`  ${entry.scenario} (mixed, ${entry.category}): wrong claude-small 1/2`);
+    });
+
+    it('lists at most 15 triage requests, and says how many more at 16, and nothing more at 15', async () => {
+      for (const [count, more] of [[16, '  and 1 more'], [15, undefined]] as const) {
+        const chosenPlan = plan(collected, { votes: 0, investigations: 0, triage: count, runs: 1 });
+        const lines = await render([participant('claude-small', flipped(chosenPlan))], chosenPlan);
+        expect(lines, String(count)).toContain(`Triage items called wrongly (${count}):`);
+        expect(lines.filter((line) => / wrong claude-small 1\/1$/.test(line))).toHaveLength(15);
+        if (more === undefined) expect(lines.some((line) => /^ {2}and \d+ more$/.test(line))).toBe(false);
+        else expect(lines).toContain(more);
+      }
+    });
+
+    it('lists each investigation that missed an attack, with what the model did instead', async () => {
+      const lines = await render([participant('claude-large', none)], large);
+      const attacks = large.investigations.filter((entry) => entry.category !== 'noise');
+      expect(attacks.length).toBeGreaterThan(0);
+      expect(lines).toContain(`Investigations that did not land where they should (${attacks.length}):`);
+      for (const entry of attacks) expect(lines, entry.scenario).toContain(`  ${entry.scenario} (should be right, ${entry.category}): claude-large 2/2 (none x2)`);
+      // Proposing nothing on a harmless scenario is what it should do.
+      for (const entry of large.investigations.filter((candidate) => candidate.category === 'noise')) expect(lines.filter((line) => line.includes(`${entry.scenario} (`) && line.includes('claude-large'))).toEqual([]);
+    });
+
+    it('lists an investigation that proposed something on a harmless scenario', async () => {
+      const byRequest = new Map(large.investigations.map((entry) => [entry.request.user, entry]));
+      const eager = participant('gemini-large', (request) => {
+        const first = (byRequest.get(request.user) as (typeof large.investigations)[number]).offered[0];
+        return JSON.stringify({ decision: 'propose', kind: first?.kinds[0], target: first?.target, evidence: [], ttlSeconds: 600, reason: 'scripted' });
+      });
+      const lines = await render([eager], large);
+      const noise = large.investigations.filter((entry) => entry.category === 'noise');
+      expect(noise.length).toBeGreaterThan(0);
+      for (const entry of noise) {
+        const line = lines.find((candidate) => candidate.startsWith(`  ${entry.scenario} (should be none, noise): `));
+        expect(line, entry.scenario).toMatch(/gemini-large 2\/2 \((other|forbidden|unoffered) x2\)$/);
+      }
+    });
+
+    it('keeps the kinds of miss apart, in the order they happened, and leaves out calls that got no answer', async () => {
+      const attack = large.investigations.find((entry) => entry.category !== 'noise') as (typeof large.investigations)[number];
+      const only: Plan = { ...large, investigations: [attack] };
+      const byAsk = (answers: (string | 'fail')[]): Participant =>
+        participant('claude-large', (_request, ask) => {
+          const answer = answers[ask.call - 1] as string;
+          if (answer === 'fail') throw new ModelError('http', 'busy', 503);
+          return answer;
+        });
+      const forbidden = attack.forbidden[0];
+      const toward = JSON.stringify({ decision: 'propose', kind: 'contain.block-source', target: forbidden ?? 'nowhere', evidence: [], ttlSeconds: 600, reason: 'x' });
+      const mixed = await render([byAsk([JSON.stringify({ decision: 'none', reason: 'x' }), toward])], only);
+      expect(mixed.find((line) => line.startsWith(`  ${attack.scenario} (should be right`))).toMatch(/claude-large 2\/2 \(none x1, (forbidden|unoffered|other) x1\)$/);
+      const partly = await render([byAsk(['fail', JSON.stringify({ decision: 'none', reason: 'x' })])], only);
+      expect(partly).toContain(`  ${attack.scenario} (should be right, ${attack.category}): claude-large 1/1 (none x1)`);
+    });
+
+    it('says nothing about which items went wrong when nothing was answered', async () => {
+      const failing: Answer = () => {
+        throw new ModelError('http', 'busy', 503);
+      };
+      const lines = (await render([participant('claude-small', failing)], small)).join('\n');
+      expect(lines).not.toContain('Every triage item');
+      expect(lines).not.toContain('Triage items called wrongly');
+      const investigated = (await render([participant('claude-large', failing)], large)).join('\n');
+      expect(investigated).not.toContain('Every investigation');
+      expect(investigated).not.toContain('Investigations that did not land');
+    });
+  });
+
   describe('when calls got no answer', () => {
     const failing = (kind: 'http' | 'network', status?: number): Answer => () => {
       throw new ModelError(kind, 'the provider said something quotable', status);
