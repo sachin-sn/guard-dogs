@@ -10,6 +10,7 @@ abstract: >-
   panel-approved actions that keep humans in the loop. Early research prototype.
 authors:
   - alias: sachin-sn
+    orcid: "https://orcid.org/0009-0008-5769-2921"
 repository-code: "https://github.com/sachin-sn/guard-dogs"
 license: Apache-2.0
 keywords:
