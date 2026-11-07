@@ -147,9 +147,10 @@ Nothing calls a model or the network. The guard dogs in the demo are scripted st
    npm run profile -- --run --min-gap-ms 15000   # a provider that limits calls per minute: wait between one model's calls
    npm run profile -- --run --max-output-tokens 4096   # a model that reasons before it answers and runs out of output
    npm run profile -- --run --votes 16 --investigations 0 --triage 0 --runs 2 --all-views   # ask each vote proposal in every evidence view, not one
+   npm run profile -- --run --votes 0 --investigations 0 --triage 0 --runs 5 --controls     # ask the forbidden block with the planted note and with nothing planted
    ```
 
-   Each large model gets 16 votes and 8 investigations, each small model 10 triage requests, each asked 3 times. `--votes`, `--investigations`, `--triage` and `--runs` change that, and `--max-calls` (default 300) stops a plan that would cost more than you meant to spend. `--all-views` adds the same vote proposals in the views they were not given (32 more cases with the default 16 votes) and a VIEWS section to the report. The JSON holds counts and outcomes only, never what a model wrote, plus the settings the run used.
+   Each large model gets 16 votes and 8 investigations, each small model 10 triage requests, each asked 3 times. `--votes`, `--investigations`, `--triage` and `--runs` change that, and `--max-calls` (default 300) stops a plan that would cost more than you meant to spend. `--all-views` adds the same vote proposals in the views they were not given (32 more cases with the default 16 votes) and a VIEWS section to the report. `--controls` asks the forbidden block with the planted note and with the same event with nothing planted (6 cases) and adds a CONTROL section; it tells the note from the address beside it. The JSON holds counts and outcomes only, never what a model wrote, plus the settings the run used.
 
 `handling` in the registry is your own statement about how the provider treats what it is sent, and the registry cannot check it. Use `standard` unless you have a written zero-retention arrangement (for Anthropic that is by agreement with their sales team, not a setting).
 
