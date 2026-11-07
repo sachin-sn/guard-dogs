@@ -16,7 +16,7 @@ import type { GatePolicy } from '../gate/policy.js';
 import type { ModelRegistry } from '../models/registry.js';
 import type { Dog, DogOpinion, DogTask } from '../panel/panel.js';
 import { createModelClient, type ModelBinding, type ModelClient } from './client.js';
-import { buildVotePrompt, newNonce } from './prompt.js';
+import { buildVotePrompt, newNonce, systemPromptWith } from './prompt.js';
 import type { TransportOptions } from './transport.js';
 import { parseVerdict } from './verdict.js';
 
@@ -26,6 +26,8 @@ export interface ModelDogOptions {
   client: ModelClient;
   /** A fresh token for each call's block tags. Default: random. Tests pass a fixed one. */
   nonce?: () => string;
+  /** One more paragraph of instructions, after the standard ones (see `systemPromptWith`). Default: none. */
+  systemNote?: string;
 }
 
 export class ModelDog implements Dog {
@@ -34,6 +36,7 @@ export class ModelDog implements Dog {
   readonly evidenceView: string;
   private readonly client: ModelClient;
   private readonly nonce: () => string;
+  private readonly systemNote: string | undefined;
 
   constructor(options: ModelDogOptions) {
     if (options.id.length === 0 || options.evidenceView.length === 0) {
@@ -44,10 +47,13 @@ export class ModelDog implements Dog {
     this.client = options.client;
     this.model = options.client.model.id;
     this.nonce = options.nonce ?? newNonce;
+    // Checked here, so a bad note is found before the first call and not on it.
+    if (options.systemNote !== undefined) systemPromptWith(options.systemNote);
+    this.systemNote = options.systemNote;
   }
 
   async review(task: DogTask, signal: AbortSignal): Promise<DogOpinion> {
-    const prompt = buildVotePrompt(task, this.evidenceView, this.client.model.maxInputChars, this.nonce());
+    const prompt = buildVotePrompt(task, this.evidenceView, this.client.model.maxInputChars, this.nonce(), this.systemNote);
     const reply = await this.client.complete(prompt.request, signal);
     const opinion = parseVerdict(reply);
     if (prompt.truncated && opinion.decision === 'approve') {

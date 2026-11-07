@@ -8,6 +8,7 @@
  *   npm run profile -- --run --only gemini --min-gap-ms 15000
  *   npm run profile -- --run --votes 16 --investigations 0 --triage 0 --all-views
  *   npm run profile -- --run --votes 0 --investigations 0 --triage 0 --controls --runs 5
+ *   npm run profile -- --run --votes 0 --investigations 0 --triage 0 --controls --marked tag,note --runs 5
  *
  * This spends API credit, so nothing is sent without `--run`, and the plan is
  * refused if it is bigger than `--max-calls` (default 300). The default plan is
@@ -34,6 +35,13 @@
  * and with nothing planted, and with the reason it came with and a plain one.
  * It adds a CONTROL section that tells the planted text from the address.
  * Like `--all-views`, the extra calls are counted in the plan, and no rate moves.
+ *
+ * `--marked tag`, `--marked note` or `--marked tag,note` (with `--controls`) asks
+ * the same controls again with the event tagged with the attributes the client
+ * wrote (`clientWritten`): `tag` changes nothing else, `note` also adds one
+ * paragraph to the reviewer's instructions saying what the tag means. The unmarked
+ * controls are asked in the same run, as the baseline, so each arm adds as many
+ * calls as the controls do and the report sets the arms side by side.
  *
  * Run `npm run live-check` first: a profile on a model that does not answer
  * measures the outage.
@@ -69,6 +77,13 @@ export async function main(
   if (onlyAt !== -1 && named !== 'anthropic' && named !== 'gemini') throw new RangeError('--only is anthropic or gemini');
   const only: Provider | undefined = named === 'anthropic' || named === 'gemini' ? named : undefined;
 
+  const markedAt = args.indexOf('--marked');
+  const markedRaw = markedAt === -1 ? undefined : args[markedAt + 1];
+  if (markedAt !== -1 && (markedRaw === undefined || markedRaw.startsWith('--'))) throw new RangeError('--marked needs tag, note or tag,note');
+  const arms = markedRaw === undefined ? [] : markedRaw.split(',');
+  for (const arm of arms) if (arm !== 'tag' && arm !== 'note') throw new RangeError('--marked needs tag, note or tag,note');
+  if (arms.length > 0 && !args.includes('--controls')) throw new RangeError('--marked needs --controls');
+
   const limits: Limits = {
     votes: whole(args, '--votes', 0) ?? DEFAULT_LIMITS.votes,
     investigations: whole(args, '--investigations', 0) ?? DEFAULT_LIMITS.investigations,
@@ -76,6 +91,7 @@ export async function main(
     runs: whole(args, '--runs', 1) ?? DEFAULT_LIMITS.runs,
     ...(args.includes('--all-views') ? { allViews: true } : {}),
     ...(args.includes('--controls') ? { controls: true } : {}),
+    ...(arms.length > 0 ? { marked: [...new Set(arms)] as ('tag' | 'note')[] } : {}),
   };
   if (limits.runs > MAX_RUNS) throw new RangeError(`--runs is at most ${MAX_RUNS}`);
   const maxCalls = whole(args, '--max-calls', 1) ?? DEFAULT_MAX_CALLS;

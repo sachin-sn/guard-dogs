@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ABLATION_SCENARIOS, ablate, renderAblation, SETUPS, type AblationRow, type Setup } from '../eval/ablation.js';
+import { marked } from '../eval/controls.js';
 import { corpus } from '../eval/corpus.js';
 import { runScenario, type RunRecord } from '../eval/harness.js';
 import { evaluate, main, render } from '../eval/run.js';
@@ -46,6 +47,15 @@ describe('the corpus', () => {
       [{ secrets: ['never-in-an-event'] }, /in no event/],
     ];
     for (const [change, message] of cases) expect(checkScenario(clone(change)).join('\n')).toMatch(message);
+
+    // What the client wrote must be named from the attributes the event has, once each.
+    const first = base.events[0] as Scenario['events'][number];
+    const named = (clientWritten: string[]): Scenario => clone({ events: [{ ...first, clientWritten }, ...base.events.slice(1)] });
+    expect(checkScenario(named([])).join('\n')).not.toMatch(/client wrote|client-written/);
+    expect(checkScenario(named(Object.keys(first.attrs).slice(0, 1))).join('\n')).not.toMatch(/client wrote|client-written/);
+    expect(checkScenario(named(['not-an-attr'])).join('\n')).toMatch(/says the client wrote "not-an-attr", which it does not have/);
+    const some = Object.keys(first.attrs)[0] as string;
+    expect(checkScenario(named([some, some])).join('\n')).toMatch(/lists a client-written attribute twice/);
 
     const benign = byId('ordinary-uploads');
     expect(checkScenario({ ...benign, correct: [{ kind: 'contain.rate-limit', target: 'shop-web:/upload' }] }).join('\n')).toMatch(/no containment is correct/);
@@ -871,6 +881,30 @@ describe('the ablation: how many independent failures a bad outcome takes', () =
 // ---- the harness ----
 
 describe('the harness', () => {
+  it('gives the dogs the list of attributes the client wrote, when the scenario says it, and nothing when it does not', async () => {
+    const seen: string[] = [];
+    const spy: ModelProfile = {
+      id: 'spy',
+      description: 'test',
+      reply(role, request, asker, truth) {
+        if (role === 'dog') seen.push(request.user);
+        return oracle.reply(role, request, asker, truth);
+      },
+    };
+    const base = byId('injection-forgeable-target');
+    await runScenario(base, spy);
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.some((user) => user.includes('clientWritten'))).toBe(false);
+
+    seen.length = 0;
+    await runScenario(marked(base), spy);
+    const raw = seen.filter((user) => user.includes('"raw-logs" view'));
+    expect(raw.length).toBeGreaterThan(0);
+    expect(raw.every((user) => user.includes('"clientWritten":["client_ip","referer"]'))).toBe(true);
+    // The summaries view names no attribute, so it shows no list either.
+    expect(seen.filter((user) => user.includes('"summaries" view')).some((user) => user.includes('clientWritten'))).toBe(false);
+  });
+
   it('turns client addresses into the pseudonyms the pipeline uses, everywhere the truth is written', async () => {
     const chain = byId('upload-shell-callback-chain');
     const tweaked: Scenario = {

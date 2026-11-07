@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CLIENT_WRITTEN_NOTE,
   MAX_REPLY_CHARS,
   ModelDog,
   Panel,
@@ -13,6 +14,7 @@ import {
   parseVerdict,
   planPanel,
   panelVerdict,
+  systemPromptWith,
   withVotes,
   type DogTask,
   type ModelBinding,
@@ -270,6 +272,55 @@ function registryOf(maxInputChars = 20_000) {
 }
 const noSignal = new AbortController().signal;
 
+describe('the note about attributes the client wrote', () => {
+  const lastLine = '{"decision":"approve"|"reject"|"abstain","rationale":"one or two sentences"}';
+
+  it('is not in the standard instructions, which end by saying how to reply', () => {
+    expect(SYSTEM_PROMPT).not.toContain('clientWritten');
+    expect(SYSTEM_PROMPT.endsWith(lastLine)).toBe(true);
+  });
+
+  it('goes between the standard instructions and the line that says how to reply', () => {
+    const system = systemPromptWith(CLIENT_WRITTEN_NOTE);
+    const split = SYSTEM_PROMPT.lastIndexOf('\n\n');
+    expect(system).toBe(`${SYSTEM_PROMPT.slice(0, split)}\n\n${CLIENT_WRITTEN_NOTE}${SYSTEM_PROMPT.slice(split)}`);
+    expect(system.startsWith(SYSTEM_PROMPT.slice(0, split))).toBe(true);
+    expect(system.endsWith(`\n\nReply with one JSON object and nothing else: ${lastLine}`)).toBe(true);
+    expect(system.split(CLIENT_WRITTEN_NOTE)).toHaveLength(2);
+  });
+
+  it('says what the list means, and that a block needs support from outside it', () => {
+    expect(CLIENT_WRITTEN_NOTE).toMatch(/`clientWritten`/);
+    expect(CLIENT_WRITTEN_NOTE).toMatch(/wrote or chose/);
+    expect(CLIENT_WRITTEN_NOTE).toMatch(/address of someone else/);
+    expect(CLIENT_WRITTEN_NOTE).toMatch(/outside that list/);
+    expect(CLIENT_WRITTEN_NOTE.length).toBeLessThanOrEqual(1000);
+  });
+
+  it('is trimmed, and must be text of 1 to 1000 characters', () => {
+    expect(systemPromptWith('  Use care.  ')).toBe(systemPromptWith('Use care.'));
+    expect(systemPromptWith('x'.repeat(1000))).toContain('x'.repeat(1000));
+    // The cap counts the text that is sent, not the padding around it.
+    expect(systemPromptWith(`  \n${'x'.repeat(1000)}\n  `)).toBe(systemPromptWith('x'.repeat(1000)));
+    expect(() => systemPromptWith(`  ${'x'.repeat(1001)}  `)).toThrow(/system note must be 1 to 1000 characters/);
+    for (const bad of ['', '   ', '\n', 'x'.repeat(1001), undefined, null, 7, ['a']]) {
+      expect(() => systemPromptWith(bad as unknown as string), JSON.stringify(bad)).toThrow(/system note must be 1 to 1000 characters/);
+    }
+  });
+
+  it('reaches the request through buildVotePrompt, and leaves the case where it was', () => {
+    const evidence = { lines: ['POST /upload'] };
+    const plain = buildVotePrompt(taskOf(evidence), 'raw-logs', 10_000, NONCE);
+    const noted = buildVotePrompt(taskOf(evidence), 'raw-logs', 10_000, NONCE, CLIENT_WRITTEN_NOTE);
+    expect(noted.request.system).toBe(systemPromptWith(CLIENT_WRITTEN_NOTE));
+    expect(noted.request.user).toBe(plain.request.user);
+    expect(noted.truncated).toBe(plain.truncated);
+    expect(() => buildVotePrompt(taskOf(evidence), 'raw-logs', 10_000, NONCE, '')).toThrow(/system note/);
+    // The evidence is data and cannot reach the instructions.
+    expect(noted.request.system).not.toContain('POST /upload');
+  });
+});
+
 describe('ModelDog', () => {
   it('takes its model from the client, so its label cannot differ from the model it calls', () => {
     const registry = registryOf();
@@ -295,6 +346,25 @@ describe('ModelDog', () => {
     expect(seen[0]?.request.system).toBe(SYSTEM_PROMPT);
     expect(seen[0]?.request.user).toContain('"summaries" view');
     expect(blockOf(seen[0]?.request.user as string, 'evidence')).toEqual(evidence);
+  });
+
+  it('asks with the note when it was given one, and with the standard instructions when not', async () => {
+    const registry = registryOf();
+    const first = stubClient(registry.require('claude-large'), '{"decision":"reject"}');
+    const noted = new ModelDog({ id: 'dog-1', evidenceView: 'raw-logs', client: first.client, systemNote: CLIENT_WRITTEN_NOTE });
+    expect(await noted.review(taskOf({ lines: [] }), noSignal)).toEqual({ decision: 'reject' });
+    expect(first.seen[0]?.request.system).toBe(systemPromptWith(CLIENT_WRITTEN_NOTE));
+
+    const second = stubClient(registry.require('claude-large'), '{"decision":"reject"}');
+    await new ModelDog({ id: 'dog-2', evidenceView: 'raw-logs', client: second.client }).review(taskOf({ lines: [] }), noSignal);
+    expect(second.seen[0]?.request.system).toBe(SYSTEM_PROMPT);
+  });
+
+  it('refuses a note that cannot be used when it is built, not when it is first asked', () => {
+    const { client } = stubClient(registryOf().require('claude-large'), '{"decision":"reject"}');
+    for (const bad of ['', '  ', 'x'.repeat(1001), 5]) {
+      expect(() => new ModelDog({ id: 'd', evidenceView: 'v', client, systemNote: bad as unknown as string }), JSON.stringify(bad)).toThrow(/system note/);
+    }
   });
 
   it('uses a different token for every review', async () => {

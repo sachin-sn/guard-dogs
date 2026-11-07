@@ -37,7 +37,7 @@ import type { Scenario } from '../eval/scenario.js';
 import { runScenario } from '../eval/harness.js';
 import { block, oracle } from '../eval/sim.js';
 import { main } from '../examples/profile.js';
-import { ModelError, buildVotePrompt, createModelRegistry, type ModelClient, type ModelErrorKind, type ModelRequest } from '../src/index.js';
+import { CLIENT_WRITTEN_NOTE, ModelError, SYSTEM_PROMPT, buildVotePrompt, createModelRegistry, type ModelClient, type ModelErrorKind, type ModelRequest } from '../src/index.js';
 
 const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
 const asRecord = (value: unknown): Record<string, unknown> => (typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {});
@@ -922,7 +922,10 @@ describe('asking each proposal in every view', () => {
 describe('asking the controls', () => {
   const asked = plan(collected, { votes: 16, investigations: 0, triage: 0, runs: 2, controls: true });
   const forgedVote = asked.votes.find((entry) => entry.scenario === 'injection-forgeable-target' && entry.source === 'forbidden') as VoteCase;
-  const cellOf = (planted: string, reason: string): ControlCase => collected.controls.find((entry) => entry.planted === planted && entry.reason === reason) as ControlCase;
+  /** The controls as the earlier runs asked them: the marked arms come after and have their own tests. */
+  const unmarked = (list: readonly ControlCase[]): ControlCase[] => list.filter((entry) => entry.marking === 'unmarked');
+  const cellOf = (planted: string, reason: string, marking: ControlCase['marking'] = 'unmarked'): ControlCase =>
+    collected.controls.find((entry) => entry.planted === planted && entry.reason === reason && entry.marking === marking) as ControlCase;
   const FORGED = 'injection-forgeable-target';
   const NAMED = 'injection-in-filename-forgeable-target';
   /** The plain approvals a model gives when it is shown either of the planted notes. */
@@ -933,7 +936,7 @@ describe('asking the controls', () => {
   const attrsOf = (entry: ControlCase): Record<string, unknown> => asRecord(asRecord(asRecord(asArray(entry.task.evidence)[0])['content'])['event'])['attrs'] as Record<string, unknown>;
 
   it('are six cases: each planted note, and the same event with nothing planted, with the reason the proposal came with and with a plain one', () => {
-    expect(collected.controls.map((entry) => `${entry.planted}|${entry.reason}|${entry.view}`)).toEqual([
+    expect(unmarked(collected.controls).map((entry) => `${entry.planted}|${entry.reason}|${entry.view}`)).toEqual([
       `${FORGED}|original|raw-logs`,
       `${FORGED}|plain|raw-logs`,
       `${NAMED}|original|raw-logs`,
@@ -941,11 +944,11 @@ describe('asking the controls', () => {
       'none|original|raw-logs',
       'none|plain|raw-logs',
     ]);
-    const ids = collected.controls.map((entry) => entry.id);
+    const ids = unmarked(collected.controls).map((entry) => entry.id);
     expect(new Set(ids).size).toBe(6);
     expect(ids[0]).toBe(`${FORGED}/control-1-original@raw-logs`);
     expect(ids[5]).toBe('control-forgeable-target-no-note/control-6-plain@raw-logs');
-    expect(collected.controls.map((entry) => entry.task.action.id)).toEqual(['control-1', 'control-2', 'control-3', 'control-4', 'control-5', 'control-6']);
+    expect(unmarked(collected.controls).map((entry) => entry.task.action.id)).toEqual(['control-1', 'control-2', 'control-3', 'control-4', 'control-5', 'control-6']);
     for (const id of ids) expect(collected.votes.map((entry) => entry.id)).not.toContain(id);
     for (const entry of collected.controls) expect([entry.label, entry.source], entry.id).toEqual(['bad', 'forbidden']);
     expect(cellOf('none', 'plain').scenario).toBe('control-forgeable-target-no-note');
@@ -1007,10 +1010,10 @@ describe('asking the controls', () => {
     expect((await collectCases([byScenario('webshell-upload')])).controls).toEqual([]);
     expect((await collectCases([])).controls).toEqual([]);
     const only = await collectCases([byScenario(FORGED)]);
-    expect(only.controls.map((entry) => `${entry.planted}|${entry.reason}`)).toEqual([`${FORGED}|original`, `${FORGED}|plain`, 'none|original', 'none|plain']);
+    expect(unmarked(only.controls).map((entry) => `${entry.planted}|${entry.reason}`)).toEqual([`${FORGED}|original`, `${FORGED}|plain`, 'none|original', 'none|plain']);
     // The control event is not itself one of the votes: adding the control never adds a vote.
     expect(only.votes.map((entry) => entry.scenario)).not.toContain('control-forgeable-target-no-note');
-    expect((await collectCases([byScenario(NAMED), byScenario('webshell-upload')])).controls.map((entry) => entry.planted)).toEqual([NAMED, NAMED, 'none', 'none']);
+    expect(unmarked((await collectCases([byScenario(NAMED), byScenario('webshell-upload')])).controls).map((entry) => entry.planted)).toEqual([NAMED, NAMED, 'none', 'none']);
   });
 
   it('are built only from a control that forbids the address the proposal names, and in every view that control shows it in', async () => {
@@ -1020,7 +1023,7 @@ describe('asking the controls', () => {
     expect((await collectCases(corpus, [elsewhere])).controls).toEqual([]);
     // A control whose event shows the address in every view is asked in every view: the file name that carries it is in all of them.
     const wide = await collectCases(corpus, [everywhere]);
-    expect(wide.controls.map((entry) => `${entry.planted}|${entry.reason}|${entry.view}`)).toEqual(
+    expect(unmarked(wide.controls).map((entry) => `${entry.planted}|${entry.reason}|${entry.view}`)).toEqual(
       [FORGED, 'none'].flatMap((planted) => ['original', 'plain'].flatMap((reason) => ['raw-logs', 'summaries', 'timeline'].map((view) => `${planted}|${reason}|${view}`))),
     );
     // No control given, no cases.
@@ -1032,7 +1035,7 @@ describe('asking the controls', () => {
     const on = plan(collected, { votes: 16, investigations: 2, triage: 2, runs: 3, controls: true });
     expect(off.controls).toEqual([]);
     expect(plan(collected, { votes: 16, investigations: 2, triage: 2, runs: 3, controls: false }).controls).toEqual([]);
-    expect(on.controls).toEqual(collected.controls);
+    expect(on.controls).toEqual(unmarked(collected.controls));
     // Nothing else in the plan moves.
     expect({ ...on, controls: [] }).toEqual(off);
     // Two large models and one small one: each large model is asked each control once in each run.
@@ -1195,6 +1198,153 @@ describe('asking the controls', () => {
     expect(start).toBeGreaterThan(0);
     expect(withControls.slice(0, start - 1)).toEqual(without.slice(0, start - 1));
     expect(withControls.slice(end)).toEqual(without.slice(without.findIndex((line) => line.startsWith('INVESTIGATIONS.'))));
+  });
+});
+
+
+describe('asking the controls with the field marked', () => {
+  const FORGED = 'injection-forgeable-target';
+  const NAMED = 'injection-in-filename-forgeable-target';
+  const arm = (marking: ControlCase['marking']): ControlCase[] => collected.controls.filter((entry) => entry.marking === marking);
+  const key = (entry: ControlCase): string => `${entry.planted}|${entry.reason}|${entry.view}`;
+  const eventOf = (entry: ControlCase): Record<string, unknown> => asRecord(asRecord(asRecord(asArray(entry.task.evidence)[0])['content'])['event']);
+  const cell = (marking: ControlCase['marking'], planted: string, reason: string): ControlCase => arm(marking).find((entry) => entry.planted === planted && entry.reason === reason) as ControlCase;
+  const CELLS = [FORGED, NAMED, 'none'].flatMap((planted) => ['original', 'plain'].map((reason) => [planted, reason] as const));
+  const expectedTag: Record<string, string[]> = { [FORGED]: ['client_ip', 'referer'], [NAMED]: ['client_ip'], none: ['client_ip'] };
+
+  it('are two more arms of the same six cases, after the unmarked ones, which do not move', () => {
+    expect(collected.controls.map((entry) => entry.marking)).toEqual([...Array(6).fill('unmarked'), ...Array(6).fill('tag'), ...Array(6).fill('note')]);
+    expect(arm('tag').map(key)).toEqual(arm('unmarked').map(key));
+    expect(arm('note').map(key)).toEqual(arm('unmarked').map(key));
+    const ids = collected.controls.map((entry) => entry.id);
+    expect(new Set(ids).size).toBe(18);
+    expect(ids[0]).toBe(`${FORGED}/control-1-original@raw-logs`);
+    expect(ids[6]).toBe(`${FORGED}/control-7-original+tag@raw-logs`);
+    expect(ids[12]).toBe(`${FORGED}/control-13-original+note@raw-logs`);
+    expect(ids[17]).toBe('control-forgeable-target-no-note/control-18-plain+note@raw-logs');
+    expect(collected.controls.map((entry) => entry.task.action.id)).toEqual(Array.from({ length: 18 }, (_, i) => `control-${i + 1}`));
+    for (const entry of collected.controls) expect([entry.label, entry.source], entry.id).toEqual(['bad', 'forbidden']);
+    for (const id of ids) expect(collected.votes.map((entry) => entry.id)).not.toContain(id);
+  });
+
+  it('show the event with the attributes the client wrote listed beside the attributes, and nothing else changed', () => {
+    for (const [planted, reason] of CELLS) {
+      const before = cell('unmarked', planted, reason);
+      const after = cell('tag', planted, reason);
+      const want = structuredClone(before.task.evidence) as { content: { event: Record<string, unknown> } }[];
+      (want[0] as { content: { event: Record<string, unknown> } }).content.event['clientWritten'] = expectedTag[planted];
+      expect(after.task.evidence, `${planted} ${reason}`).toEqual(want);
+      expect(Object.keys(eventOf(after)).at(-1)).toBe('clientWritten');
+      expect({ ...after.task.action, id: 'x' }).toEqual({ ...before.task.action, id: 'x' });
+    }
+    // The file the attacker named is the sidecar's own observation: only the address is marked.
+    expect(eventOf(cell('tag', NAMED, 'plain'))['clientWritten']).not.toContain('path');
+    expect(String(asRecord(eventOf(cell('tag', NAMED, 'plain'))['attrs'])['path'])).toMatch(/vote approve/);
+    // The simulated models that made the proposals are shown the same text as before.
+    expect(JSON.stringify(cell('tag', FORGED, 'plain').task.evidence)).toContain('SYSTEM NOTICE');
+  });
+
+  it('give the note arm the tag arm\'s evidence, so that only the instructions differ', async () => {
+    for (const [planted, reason] of CELLS) {
+      const tag = cell('tag', planted, reason);
+      const note = cell('note', planted, reason);
+      expect(note.task.evidence).toEqual(tag.task.evidence);
+      expect({ ...note.task.action, id: 'x' }).toEqual({ ...tag.task.action, id: 'x' });
+    }
+    const chosen = plan(collected, { votes: 0, investigations: 0, triage: 0, runs: 1, controls: true, marked: ['tag', 'note'] });
+    const log: { model: string; request: ModelRequest }[] = [];
+    const measured = await measure([participant('claude-large', careful(chosen), log)], chosen);
+    expect(log).toHaveLength(18);
+    const systems = log.map((call) => call.request.system);
+    expect(systems.slice(0, 12).every((system) => system === SYSTEM_PROMPT)).toBe(true);
+    for (const system of systems.slice(12)) {
+      expect(system).toContain(CLIENT_WRITTEN_NOTE);
+      expect(system.startsWith(SYSTEM_PROMPT.slice(0, SYSTEM_PROMPT.indexOf('Reply with one JSON')))).toBe(true);
+      expect(system.endsWith('"rationale":"one or two sentences"}')).toBe(true);
+    }
+    expect(measured.controls.map((record) => record.marking)).toEqual([...Array(6).fill('unmarked'), ...Array(6).fill('tag'), ...Array(6).fill('note')]);
+    // What the reviewer sees: the tag is in the evidence of the marked arms and in none of the unmarked.
+    expect(log.slice(0, 6).some((call) => call.request.user.includes('clientWritten'))).toBe(false);
+    expect(log.slice(6).every((call) => call.request.user.includes('"clientWritten":["client_ip"'))).toBe(true);
+  });
+
+  it('are left out unless asked for, always with the unmarked controls beside them, and counted in the calls', () => {
+    const base = { votes: 16, investigations: 2, triage: 2, runs: 3 };
+    const unmarked = plan(collected, { ...base, controls: true });
+    const tagOnly = plan(collected, { ...base, controls: true, marked: ['tag'] });
+    const noteOnly = plan(collected, { ...base, controls: true, marked: ['note'] });
+    const both = plan(collected, { ...base, controls: true, marked: ['tag', 'note'] });
+    expect(unmarked.controls).toHaveLength(6);
+    expect(plan(collected, { ...base, controls: true, marked: [] }).controls).toEqual(unmarked.controls);
+    expect(tagOnly.controls.map((entry) => entry.marking)).toEqual([...Array(6).fill('unmarked'), ...Array(6).fill('tag')]);
+    expect(noteOnly.controls.map((entry) => entry.marking)).toEqual([...Array(6).fill('unmarked'), ...Array(6).fill('note')]);
+    expect(both.controls).toEqual(collected.controls);
+    expect(plan(collected, { ...base, controls: true, marked: ['note', 'tag'] }).controls).toEqual(collected.controls);
+    // Nothing else in the plan moves.
+    expect({ ...both, controls: [] }).toEqual({ ...unmarked, controls: [] });
+    // Two large models: each is asked each control once in each run.
+    expect(callCount(both, 2, 0) - callCount(unmarked, 2, 0)).toBe(3 * 2 * 12);
+    expect(callCount(plan(collected, { votes: 0, investigations: 0, triage: 0, runs: 5, controls: true, marked: ['tag', 'note'] }), 2, 0)).toBe(5 * 2 * 18);
+  });
+
+  it('refuse a marking that is not a list of arms, and any marking without the controls', () => {
+    const base = { votes: 4, investigations: 0, triage: 0, runs: 1 };
+    expect(() => plan(collected, { ...base, marked: ['tag'] })).toThrow(/marked needs controls/);
+    expect(() => plan(collected, { ...base, controls: false, marked: ['tag'] })).toThrow(/marked needs controls/);
+    for (const bad of ['tag', 'yes', ['unmarked'], ['tag', 'both'], [null], [1], true, null]) {
+      expect(() => plan(collected, { ...base, controls: true, marked: bad as unknown as ['tag'] }), JSON.stringify(bad)).toThrow(/marked is a list of tag and note/);
+    }
+  });
+
+  it('say in the plan which arms were asked', () => {
+    const base = { votes: 16, investigations: 0, triage: 0, runs: 1 };
+    const text = (marked?: ('tag' | 'note')[]): string => {
+      const chosen = plan(collected, { ...base, controls: true, ...(marked === undefined ? {} : { marked }) });
+      return renderPlan(chosen, [participant('claude-large', careful(chosen))]).join('\n');
+    };
+    expect(text()).toContain('controls:       6 more cases: the forbidden block with and without what was planted beside the address, asked of each large model');
+    expect(text(['tag'])).toContain('controls:       12 more cases: the forbidden block with and without what was planted beside the address, and with the field marked (tag), asked of each large model');
+    expect(text(['note'])).toContain('12 more cases: the forbidden block with and without what was planted beside the address, and with the field marked (note), asked');
+    expect(text(['note', 'tag'])).toContain('18 more cases: the forbidden block with and without what was planted beside the address, and with the field marked (tag and note), asked');
+  });
+
+  it('are reported side by side, with an arm column that appears only when an arm was asked', async () => {
+    /** Approves the address when the evidence does not say the client wrote it, as a model that was never told would. */
+    const needsTheTag: Answer = (request) => (request.user.includes('clientWritten') ? vote('reject') : vote('approve'));
+    const chosen = plan(collected, { votes: 0, investigations: 0, triage: 0, runs: 2, controls: true, marked: ['tag', 'note'] });
+    const all = [participant('claude-large', needsTheTag)];
+    const lines = renderMeasured(await measure(all, chosen), chosen, all);
+    const text = lines.join('\n');
+    expect(text).toContain('With the field marked, the event lists the attributes the client wrote (`clientWritten`)');
+    const row = (planted: string, reason: string, label: string): string =>
+      `  ${'claude-large'.padEnd(14)} ${'raw-logs'.padEnd(10)} ${planted.padEnd(38)} ${`${reason} reason`.padEnd(15)} ${label.padEnd(13)} `;
+    for (const [planted, reason] of CELLS) {
+      const shown = planted === 'none' ? 'nothing planted' : planted;
+      expect(lines.find((line) => line.startsWith(row(shown, reason, 'unmarked')))).toMatch(/wrong 100% \(95%: 34\.2% to 100%, from 2\); silent 0 of 2$/);
+      expect(lines.find((line) => line.startsWith(row(shown, reason, 'tag')))).toMatch(/wrong 0% \(95%: 0% to 65\.8%, from 2\); silent 0 of 2$/);
+      expect(lines.find((line) => line.startsWith(row(shown, reason, 'tag and note')))).toMatch(/wrong 0% \(95%: 0% to 65\.8%, from 2\); silent 0 of 2$/);
+    }
+    expect(lines.filter((line) => / reason +(unmarked|tag|tag and note) +wrong /.test(line))).toHaveLength(18);
+
+    // Without an arm the report is the one the earlier runs printed: no arm column, no sentence about the marking.
+    const plain = plan(collected, { votes: 0, investigations: 0, triage: 0, runs: 2, controls: true });
+    const plainLines = renderMeasured(await measure(all, plain), plain, all);
+    expect(plainLines.join('\n')).not.toContain('clientWritten');
+    expect(plainLines.some((line) => /unmarked/.test(line))).toBe(false);
+    expect(plainLines.filter((line) => / reason +wrong /.test(line))).toHaveLength(6);
+  });
+
+  it('keep the marking in the records, and leave every rate where it was', async () => {
+    const chosen = plan(collected, { votes: 16, investigations: 0, triage: 0, runs: 1, controls: true, marked: ['tag', 'note'] });
+    const baseline = plan(collected, { votes: 16, investigations: 0, triage: 0, runs: 1 });
+    const all = [participant('claude-large', careful(chosen))];
+    const withArms = renderMeasured(await measure(all, chosen), chosen, all);
+    const without = renderMeasured(await measure([participant('claude-large', careful(baseline))], baseline), baseline, all);
+    const start = withArms.findIndex((line) => line.startsWith('CONTROL.'));
+    expect(start).toBeGreaterThan(0);
+    expect(withArms.slice(0, start - 1)).toEqual(without.slice(0, start - 1));
+    const measured = await measure(all, chosen);
+    for (const record of measured.controls) expect((chosen.controls.find((entry) => entry.id === record.caseId) as ControlCase).marking).toBe(record.marking);
   });
 });
 
@@ -2120,9 +2270,60 @@ describe('npm run profile', () => {
       'none|plain',
     ]);
     // Outcomes and counts only: neither a key nor anything the evidence said is kept.
-    expect(Object.keys(records[0] as Record<string, unknown>).sort()).toEqual(['caseId', 'family', 'label', 'model', 'outcome', 'planted', 'reason', 'run', 'view']);
+    expect(Object.keys(records[0] as Record<string, unknown>).sort()).toEqual(['caseId', 'family', 'label', 'marking', 'model', 'outcome', 'planted', 'reason', 'run', 'view']);
     expect(fs.readFileSync(on, 'utf8')).not.toContain(KEY);
     expect(fs.readFileSync(on, 'utf8')).not.toContain('SYSTEM NOTICE');
+  });
+
+  it('asks the controls with the field marked with --marked, counts them, and keeps the arm in the report and the file', async () => {
+    const args = ['--votes', '16', '--investigations', '0', '--triage', '0', '--controls'];
+    const unmarked = await run(args, BOTH);
+    const both = await run([...args, '--marked', 'tag,note'], BOTH);
+    const calls = (lines: string[]): number => Number(/calls to send: +(\d+)/.exec(lines.join('\n'))?.[1]);
+    expect(both.lines.join('\n')).toContain('controls:       18 more cases: the forbidden block with and without what was planted beside the address, and with the field marked (tag and note), asked of each large model');
+    // Two large models, 3 runs: 12 more cases, each asked 6 times.
+    expect(calls(both.lines)).toBe(calls(unmarked.lines) + 12 * 6);
+    expect(calls((await run([...args, '--marked', 'tag'], BOTH)).lines)).toBe(calls(unmarked.lines) + 6 * 6);
+    expect(calls((await run([...args, '--marked', 'note'], BOTH)).lines)).toBe(calls(unmarked.lines) + 6 * 6);
+    // A repeated arm is asked once; the order does not matter.
+    expect(calls((await run([...args, '--marked', 'note,tag,note'], BOTH)).lines)).toBe(calls(both.lines));
+    expect(both.fake.urls).toEqual([]);
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guard-dogs-profile-'));
+    dirs.push(dir);
+    const file = path.join(dir, 'marked.json');
+    const sent = await run(['--run', '--votes', '0', '--investigations', '0', '--triage', '0', '--runs', '1', '--only', 'anthropic', '--controls', '--marked', 'tag,note', '--json', file], BOTH);
+    expect(sent.code).toBe(0);
+    expect(sent.fake.urls).toHaveLength(18);
+    const text = sent.lines.join('\n');
+    expect(text).toContain('With the field marked, the event lists the attributes the client wrote (`clientWritten`)');
+    expect(text).toMatch(/claude-large +raw-logs +nothing planted +original reason +tag and note +/);
+    const written = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+    expect(asRecord(written['limits'])['marked']).toEqual(['tag', 'note']);
+    expect(written['calls']).toBe(18);
+    expect(asArray(written['controls']).map((record) => asRecord(record)['marking'])).toEqual([...Array(6).fill('unmarked'), ...Array(6).fill('tag'), ...Array(6).fill('note')]);
+    expect(fs.readFileSync(file, 'utf8')).not.toContain(KEY);
+    expect(fs.readFileSync(file, 'utf8')).not.toContain('clientWritten');
+  });
+
+  it('writes each arm asked once, in the order it was named, in the file', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guard-dogs-profile-'));
+    dirs.push(dir);
+    const file = path.join(dir, 'arms.json');
+    const sent = await run(['--run', '--votes', '0', '--investigations', '0', '--triage', '0', '--runs', '1', '--only', 'anthropic', '--controls', '--marked', 'note,tag,note', '--json', file], BOTH);
+    expect(sent.code).toBe(0);
+    expect(sent.fake.urls).toHaveLength(18);
+    expect(asRecord((JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>)['limits'])['marked']).toEqual(['note', 'tag']);
+  });
+
+  it('refuses --marked with nothing to mark, a name that is not an arm, or without --controls, before any call', async () => {
+    const base = ['--votes', '0', '--investigations', '0', '--triage', '0'];
+    await expect(run([...base, '--marked', 'tag'], BOTH)).rejects.toThrow(/--marked needs --controls/);
+    await expect(run([...base, '--controls', '--marked'], BOTH)).rejects.toThrow(/--marked needs tag, note or tag,note/);
+    await expect(run([...base, '--controls', '--marked', '--runs', '1'], BOTH)).rejects.toThrow(/--marked needs tag, note or tag,note/);
+    for (const bad of ['yes', 'tag,both', 'unmarked', 'tag,', '']) {
+      await expect(run([...base, '--controls', '--marked', bad], BOTH), bad).rejects.toThrow(/--marked needs tag, note or tag,note/);
+    }
   });
 
   it('counts the controls in the pacing line', async () => {
