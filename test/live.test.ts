@@ -243,6 +243,23 @@ describe('the labelled cases, on scenarios the corpus does not have', () => {
     expect(votes).toEqual([`bad/forbidden ${BLOCK} ${ENDPOINT}`, `good/right ${RATE} ${ENDPOINT}`, `bad/decoy ${RATE} shop-web:/checkout`]);
   });
 
+  it('leave a decoy twin out of a view that happens to mention its target, as it is left out of the view it is asked in', async () => {
+    const DECOY_FILE = '/var/www/html/uploads/holiday-2291.jpg';
+    // Only the raw-logs view carries every attribute, so only it mentions the decoy's target. The first scenario takes the first view in the rotation, so this one is asked in the second.
+    const noted: Scenario = { ...base, id: 'webshell-upload-noted', events: base.events.map((event) => (event.kind === 'file.created' ? { ...event, attrs: { ...event.attrs, note: DECOY_FILE } } : event)) };
+    const found = await collectCases([base, noted]);
+    const twin = found.votes.find((entry) => entry.scenario === noted.id && entry.source === 'decoy') as VoteCase;
+    const good = found.votes.find((entry) => entry.scenario === noted.id && entry.source === 'right') as VoteCase;
+    expect([good.view, twin.view]).toEqual(['summaries', 'summaries']);
+    const copies = (of: VoteCase): VoteCase[] => found.variants.filter((entry) => entry.variantOf === of.id);
+    // The good proposal is asked in both the other views, and the raw-logs one does mention the decoy's target.
+    expect(copies(good).map((entry) => entry.view).sort()).toEqual(['raw-logs', 'timeline']);
+    expect(JSON.stringify(copies(good).find((entry) => entry.view === 'raw-logs')?.task.evidence)).toContain(DECOY_FILE);
+    // So the decoy is not asked there, but is asked in the view that leaves it out.
+    expect(copies(twin).map((entry) => entry.view)).toEqual(['timeline']);
+    for (const entry of copies(twin)) expect(JSON.stringify(entry.task.evidence)).not.toContain(DECOY_FILE);
+  });
+
   it('call a proposal in a scenario where nothing malicious happened bad, and a proposal on a forbidden target bad whatever else is true', async () => {
     const harmless = collected.votes.filter((entry) => entry.source === 'harmless');
     expect(harmless.length).toBeGreaterThan(0);
@@ -773,6 +790,68 @@ describe('asking each proposal in every view', () => {
     const good = wide.votes.find((entry) => entry.label === 'good' && entry.view !== 'summaries') as VoteCase;
     expect(lines).toContain(`  ${good.id} (good, ${good.source}): claude-large ${['raw-logs', 'summaries', 'timeline'].map((view) => `${view} ${view === 'summaries' ? 'abstain' : 'approve'} x2`).join('; ')}`);
     expect(lines.some((line) => line.startsWith('Proposals where the view mattered, or a vote was wrong ('))).toBe(true);
+  });
+
+  it('leaves a proposal out of the VIEWS section when none of its other views was asked, even if the model was wrong on it', async () => {
+    // A hand-made plan: the forgeable-target proposal has no copies. A model that approves everything is wrong on it, but there is no view to compare it in.
+    const without: Plan = { ...wide, variants: wide.variants.filter((entry) => entry.variantOf !== forged.id) };
+    const all = [participant('claude-large', () => vote('approve'))];
+    const lines = renderMeasured(await measure(all, without), without, all);
+    const section = lines.slice(lines.findIndex((line) => line.startsWith('VIEWS.')), lines.findIndex((line) => line.startsWith('INVESTIGATIONS.')));
+    expect(section.some((line) => line.includes(forged.id))).toBe(false);
+    // The rest are still compared. A bad proposal approved in every view is wrong on 3 of its 3 views, 2 runs each.
+    const compared = without.votes.filter((entry) => without.variants.some((copy) => copy.variantOf === entry.id));
+    expect(compared).toHaveLength(without.votes.length - 1);
+    expect(section.filter((line) => line.startsWith('  ') && line.includes('claude-large   ') && line.includes('wrong ')).length).toBe(3);
+    const perView = (view: string): string => section.find((line) => line.startsWith(`  claude-large   ${view}`)) as string;
+    for (const view of ['raw-logs', 'summaries', 'timeline']) {
+      const inView = [...compared, ...without.variants].filter((entry) => entry.view === view && entry.label === 'bad').length;
+      const wrong = 2 * inView;
+      const total = 2 * [...compared, ...without.variants].filter((entry) => entry.view === view).length;
+      expect(perView(view), view).toContain(`from ${total}); silent 0 of ${total}`);
+      expect(perView(view), view).toContain(`wrong ${Math.round((1000 * wrong) / total) / 10}%`);
+    }
+  });
+
+  it('lists the views in a fixed order, whatever order the proposals were asked in', async () => {
+    const all = [participant('claude-large', obeys(wide))];
+    const lines = renderMeasured(await measure(all, wide), wide, all);
+    const at = (view: string): number => lines.findIndex((line) => line.startsWith(`  claude-large   ${view}`));
+    expect(at('raw-logs')).toBeGreaterThan(-1);
+    expect(at('raw-logs')).toBeLessThan(at('summaries'));
+    expect(at('summaries')).toBeLessThan(at('timeline'));
+    // And on the list of proposals, a line reads in the same order.
+    expect(lines.some((line) => /raw-logs [^;]*; summaries [^;]*; timeline /.test(line))).toBe(true);
+    expect(lines.some((line) => /timeline [^;]*; summaries /.test(line))).toBe(false);
+  });
+
+  it('gives no lines to a model that was not asked, though it is among the participants', async () => {
+    const asked = participant('claude-large', careful(wide));
+    const idle = participant('gemini-large', careful(wide));
+    const lines = renderMeasured(await measure([asked], wide), wide, [asked, idle]);
+    expect(lines.some((line) => line.startsWith('  claude-large   raw-logs'))).toBe(true);
+    expect(lines.some((line) => /^ {2}gemini-large {3}(raw-logs|summaries|timeline) /.test(line))).toBe(false);
+  });
+
+  it('says what a model did in a view in a fixed order: approved, rejected, abstained, no answer', async () => {
+    const four: Plan = { ...wide, runs: 4 };
+    const seen = new Map<string, number>();
+    const script = ['approve', 'reject', 'abstain', 'fail'] as const;
+    const turns: Answer = (request) => {
+      const key = `${/Evidence for the "([a-z-]+)" view/.exec(request.user)?.[1]}|${String(asRecord(block(request.user, 'proposal'))['target'])}|${JSON.stringify(block(request.user, 'evidence'))}`;
+      const turn = seen.get(key) ?? 0;
+      seen.set(key, turn + 1);
+      const what = script[turn % script.length] as (typeof script)[number];
+      if (what === 'fail') throw new ModelError('network', 'the connection dropped');
+      return vote(what);
+    };
+    const all = [participant('claude-large', turns)];
+    const lines = renderMeasured(await measure(all, four), four, all);
+    const first = four.votes[0] as VoteCase;
+    const said = 'approve x1, reject x1, abstain x1, no answer x1';
+    expect(lines).toContain(`  ${first.id} (${first.label}, ${first.source}): claude-large raw-logs ${said}; summaries ${said}; timeline ${said}`);
+    // Each view line counts the failed call as a call that got no answer, and the other three as answers.
+    expect(lines.find((line) => line.startsWith('  claude-large   raw-logs'))).toMatch(/silent \d+ of \d+ \(\d+ with no answer\)$/);
   });
 
   it('puts a model that is wrong the same way in every view in the list too, so that a note every view carries is not missed', async () => {
