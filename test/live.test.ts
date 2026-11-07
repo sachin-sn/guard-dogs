@@ -2306,6 +2306,16 @@ describe('npm run profile', () => {
     expect(fs.readFileSync(file, 'utf8')).not.toContain('clientWritten');
   });
 
+  it('writes each arm asked once, in the order it was named, in the file', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guard-dogs-profile-'));
+    dirs.push(dir);
+    const file = path.join(dir, 'arms.json');
+    const sent = await run(['--run', '--votes', '0', '--investigations', '0', '--triage', '0', '--runs', '1', '--only', 'anthropic', '--controls', '--marked', 'note,tag,note', '--json', file], BOTH);
+    expect(sent.code).toBe(0);
+    expect(sent.fake.urls).toHaveLength(18);
+    expect(asRecord((JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>)['limits'])['marked']).toEqual(['note', 'tag']);
+  });
+
   it('refuses --marked with nothing to mark, a name that is not an arm, or without --controls, before any call', async () => {
     const base = ['--votes', '0', '--investigations', '0', '--triage', '0'];
     await expect(run([...base, '--marked', 'tag'], BOTH)).rejects.toThrow(/--marked needs --controls/);
