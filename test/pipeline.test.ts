@@ -657,6 +657,14 @@ describe('pipeline: where a containment\'s target came from', () => {
     expect((await pipeline.submit(block(['evt-forged', 'evt-socket']))).status).toBe('applied');
   });
 
+  it('counts a host-supplied field of the same event that holds the address too, whatever else holds it', async () => {
+    const { pipeline } = setup({}, false, { preApproved });
+    const event = upload({ client_ip: ADDRESS, peer: ADDRESS }, ['client_ip']);
+    await pipeline.ingestEvents([event]);
+
+    expect((await pipeline.submit(block([event.id]))).status).toBe('applied');
+  });
+
   it('does not take an address typed into a file name for the file\'s own: the file stays containable, the address does not', async () => {
     const { pipeline, adapter } = setup({}, false, { preApproved });
     // The masker turns the address in the name into the same token the client_ip field holds.
