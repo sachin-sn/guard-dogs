@@ -9,6 +9,7 @@
  *   npm run profile -- --run --votes 16 --investigations 0 --triage 0 --all-views
  *   npm run profile -- --run --votes 0 --investigations 0 --triage 0 --controls --runs 5
  *   npm run profile -- --run --votes 0 --investigations 0 --triage 0 --controls --marked tag,note --runs 5
+ *   npm run profile -- --run --votes 0 --investigations 0 --triage 0 --twin --marked tag,note --runs 5
  *
  * This spends API credit, so nothing is sent without `--run`, and the plan is
  * refused if it is bigger than `--max-calls` (default 300). The default plan is
@@ -36,12 +37,18 @@
  * It adds a CONTROL section that tells the planted text from the address.
  * Like `--all-views`, the extra calls are counted in the plan, and no rate moves.
  *
- * `--marked tag`, `--marked note` or `--marked tag,note` (with `--controls`) asks
- * the same controls again with the event tagged with the attributes the client
- * wrote (`clientWritten`): `tag` changes nothing else, `note` also adds one
+ * `--twin` asks the twin of the controls: a block on the address of the connection,
+ * which is right to approve, and one on the address the client wrote, which is
+ * not, about the same event. It adds a TWIN section. Together with `--marked` it
+ * shows whether the paragraph that makes the models refuse the second also makes
+ * them refuse the first.
+ *
+ * `--marked tag`, `--marked note` or `--marked tag,note` (with `--controls`, `--twin`
+ * or both) asks the same cases again with the event tagged with the attributes the
+ * client wrote (`clientWritten`): `tag` changes nothing else, `note` also adds one
  * paragraph to the reviewer's instructions saying what the tag means. The unmarked
- * controls are asked in the same run, as the baseline, so each arm adds as many
- * calls as the controls do and the report sets the arms side by side.
+ * cases are asked in the same run, as the baseline, so each arm adds as many
+ * calls as the unmarked ones and the report sets the arms side by side.
  *
  * Run `npm run live-check` first: a profile on a model that does not answer
  * measures the outage.
@@ -82,7 +89,7 @@ export async function main(
   if (markedAt !== -1 && (markedRaw === undefined || markedRaw.startsWith('--'))) throw new RangeError('--marked needs tag, note or tag,note');
   const arms = markedRaw === undefined ? [] : markedRaw.split(',');
   for (const arm of arms) if (arm !== 'tag' && arm !== 'note') throw new RangeError('--marked needs tag, note or tag,note');
-  if (arms.length > 0 && !args.includes('--controls')) throw new RangeError('--marked needs --controls');
+  if (arms.length > 0 && !args.includes('--controls') && !args.includes('--twin')) throw new RangeError('--marked needs --controls or --twin');
 
   const limits: Limits = {
     votes: whole(args, '--votes', 0) ?? DEFAULT_LIMITS.votes,
@@ -91,6 +98,7 @@ export async function main(
     runs: whole(args, '--runs', 1) ?? DEFAULT_LIMITS.runs,
     ...(args.includes('--all-views') ? { allViews: true } : {}),
     ...(args.includes('--controls') ? { controls: true } : {}),
+    ...(args.includes('--twin') ? { twin: true } : {}),
     ...(arms.length > 0 ? { marked: [...new Set(arms)] as ('tag' | 'note')[] } : {}),
   };
   if (limits.runs > MAX_RUNS) throw new RangeError(`--runs is at most ${MAX_RUNS}`);
@@ -133,7 +141,7 @@ export async function main(
   for (const line of renderPlan(chosen, participants)) print(line);
   if (minGapMs !== undefined && minGapMs > 0) {
     // The longest queue: a large model's votes and investigations, or a small model's triage requests, once for each run.
-    const longest = Math.max(large > 0 ? (chosen.votes.length + chosen.variants.length + chosen.controls.length + chosen.investigations.length) * limits.runs : 0, participants.length > large ? chosen.triage.length * limits.runs : 0);
+    const longest = Math.max(large > 0 ? (chosen.votes.length + chosen.variants.length + chosen.controls.length + chosen.twins.length + chosen.investigations.length) * limits.runs : 0, participants.length > large ? chosen.triage.length * limits.runs : 0);
     print(`  pacing:         at least ${minGapMs} ms between one model's calls, so the slowest model takes at least ${Math.ceil((longest * minGapMs) / 60_000)} minutes`);
   }
   if (calls > maxCalls) {

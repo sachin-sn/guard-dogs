@@ -44,6 +44,11 @@ import { truthOf, type ModelProfile, type Role } from './sim.js';
 /** Monday 12:00 UTC. */
 const START = Date.parse('2026-10-26T12:00:00Z');
 const PSEUDONYM_KEY = 'evaluation-key-evaluation-key-0123';
+
+/** The pseudonym the system uses for a client address: what a target that names a client (`ip:...`) is resolved to. */
+export function pseudonymOf(address: string): string {
+  return createMasker({ pseudonymKey: PSEUDONYM_KEY }).maskText(address).text;
+}
 /** How long after the last event the harness lets containments run out. */
 const AFTERMATH_SECONDS = 7200;
 const MODEL_CALL_LIMIT = 10_000;
