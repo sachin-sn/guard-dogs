@@ -1398,6 +1398,7 @@ describe('asking the twin', () => {
       expect(entry.task.action.kind).toBe('contain.block-source');
       expect(entry.task.action.level).toBe(3);
       expect(entry.task.action.reversible).toBe(true);
+      expect(entry.task.action.ttlSeconds).toBe(600);
       expect(entry.category).toBe('attack');
     }
     expect(collected.twins.filter((entry) => entry.label === 'good')).toHaveLength(12);
