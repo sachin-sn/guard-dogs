@@ -59,13 +59,22 @@
  * each arm adds as many calls as the unmarked ones and the report sets the arms side
  * by side.
  *
+ * Each model's calls are asked in a random order, a different one for each run, so
+ * that an arm is not always asked at the same point in a run (the first seven runs
+ * asked the unmarked arm first and the marked arms last). The order comes from a
+ * seed: `--seed N` fixes it (the report and the JSON say which seed a run used),
+ * and `--in-order` asks in the order the plan lists the cases, as those runs did.
+ * The JSON keeps, for each model and run, the cases in the order they were asked.
+ *
  * Run `npm run live-check` first: a profile on a model that does not answer
  * measures the outage.
  */
 
+import { randomInt } from 'node:crypto';
 import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { collectCases, callCount, callHealth, plan, renderMeasured, renderPlan, DEFAULT_LIMITS, DEFAULT_TIMEOUT_MS, MAX_RUNS, measure, type Limits, type Participant } from '../eval/live.js';
+import { MAX_SEED } from '../eval/order.js';
 import { DEFAULT_MAX_OUTPUT_TOKENS, PROVIDERS, loadDotEnv, targetsFromEnv, type Provider } from './live-check.js';
 import type { TransportOptions } from '../src/index.js';
 
@@ -119,6 +128,12 @@ export async function main(
   const timeoutMs = whole(args, '--timeout-ms', 1);
   const minGapMs = whole(args, '--min-gap-ms', 0);
   if (minGapMs !== undefined && minGapMs > MAX_GAP_MS) throw new RangeError(`--min-gap-ms is at most ${MAX_GAP_MS}`);
+  // The calls are asked in a random order unless told otherwise; the seed is kept so that a run can be repeated.
+  const inOrder = args.includes('--in-order');
+  const seedGiven = whole(args, '--seed', 0);
+  if (inOrder && args.includes('--seed')) throw new RangeError('--in-order and --seed do not go together');
+  if (seedGiven !== undefined && seedGiven > MAX_SEED) throw new RangeError(`--seed is at most ${MAX_SEED}`);
+  const seed = inOrder ? undefined : (seedGiven ?? randomInt(0, MAX_SEED + 1));
   const jsonAt = args.indexOf('--json');
   const jsonFile = jsonAt === -1 ? undefined : args[jsonAt + 1];
   if (jsonAt !== -1 && (jsonFile === undefined || jsonFile.startsWith('--'))) throw new RangeError('--json needs a file name');
@@ -156,6 +171,7 @@ export async function main(
     const longest = Math.max(large > 0 ? (chosen.votes.length + chosen.variants.length + chosen.controls.length + chosen.twins.length + chosen.twinInvestigations.length + chosen.investigations.length) * limits.runs : 0, participants.length > large ? chosen.triage.length * limits.runs : 0);
     print(`  pacing:         at least ${minGapMs} ms between one model's calls, so the slowest model takes at least ${Math.ceil((longest * minGapMs) / 60_000)} minutes`);
   }
+  print(seed === undefined ? "  order:          each model's calls in the order the plan lists them" : `  order:          each model's calls in a random order for each run (seed ${seed}; --seed ${seed} repeats it)`);
   if (calls > maxCalls) {
     print('');
     print(`That is more than --max-calls ${maxCalls}. Lower --runs, --votes, --investigations or --triage, or raise --max-calls if you mean to spend it.`);
@@ -172,6 +188,7 @@ export async function main(
   const measured = await measure(participants, chosen, {
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
     ...(minGapMs === undefined ? {} : { minGapMs }),
+    ...(seed === undefined ? {} : { shuffleSeed: seed }),
     onProgress: (done, total) => {
       if (done === total || done - last >= 25) {
         last = done;
@@ -185,7 +202,12 @@ export async function main(
     // Counts and outcomes only: what the models wrote is not kept.
     const models = participants.map((participant) => ({ name: participant.name, family: participant.family, tier: participant.tier, api: participant.api }));
     // The settings are what the run used, so a file can say how it was made.
-    const settings = { minGapMs: minGapMs ?? 0, maxOutputTokens: maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS, timeoutMs: timeoutMs ?? DEFAULT_TIMEOUT_MS };
+    const settings = {
+      minGapMs: minGapMs ?? 0,
+      maxOutputTokens: maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+      timeoutMs: timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      ...(seed === undefined ? { order: 'plan' } : { order: 'shuffled', seed }),
+    };
     fs.writeFileSync(jsonFile, `${JSON.stringify({ limits, settings, calls, models, ...measured }, null, 2)}\n`);
     print(`\nwrote ${jsonFile}`);
   }
