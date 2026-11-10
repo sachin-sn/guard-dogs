@@ -1398,6 +1398,7 @@ describe('asking the twin', () => {
       expect(entry.task.action.kind).toBe('contain.block-source');
       expect(entry.task.action.level).toBe(3);
       expect(entry.task.action.reversible).toBe(true);
+      expect(entry.task.action.ttlSeconds).toBe(600);
       expect(entry.category).toBe('attack');
     }
     expect(collected.twins.filter((entry) => entry.label === 'good')).toHaveLength(12);
@@ -1533,6 +1534,24 @@ describe('asking the twin', () => {
     expect(measured.controls).toEqual([]);
   });
 
+  it('wait for the gap before every call but the first, like every other kind of case', async () => {
+    const chosen = plan(collected, { votes: 0, investigations: 0, triage: 0, runs: 2, twin: true });
+    const sleeps: number[] = [];
+    let time = 1_000;
+    const clock: Clock = { now: () => time, sleep: async (ms) => { sleeps.push(ms); time += ms; } };
+    await measure([participant('claude-large', blocking(chosen))], chosen, { minGapMs: 500, clock });
+    // 2 runs of 6 cases: 12 calls, 11 waits.
+    expect(sleeps).toEqual(Array(11).fill(500));
+  });
+
+  it('refuse a twin whose event the oracle does not escalate, instead of asking nothing and saying nothing', async () => {
+    const first = twinList[0] as (typeof twinList)[number];
+    const quiet = { ...first, scenario: { ...first.scenario, id: 'twin-quiet', markers: ['nothing-in-the-event-says-this'] } };
+    await expect(collectCases([], [], [quiet])).rejects.toThrow('twin twin-quiet: the oracle\'s panel was never asked, so there is no proposal to ask about');
+    expect((await collectCases([], [], [first])).twins).toHaveLength(12);
+    expect((await collectCases([], [], [])).twins).toEqual([]);
+  });
+
   it('keep a call that fails as a record with no answer, and never as a vote', async () => {
     const chosen = plan(collected, { votes: 0, investigations: 0, triage: 0, runs: 1, twin: true });
     const measured = await measure(
@@ -1605,6 +1624,50 @@ describe('asking the twin', () => {
     // Without the twin there is no section at all.
     const off = renderMeasured(await measure(all, baseline), baseline, all);
     expect(off.join('\n')).not.toContain('TWIN.');
+  });
+
+  it('keep each arm to its own row, so that a model that changes with the marking shows it', async () => {
+    /** Approves every block until it is shown the list, as a model that reads the list as a reason to refuse. */
+    const refusesOnceMarked: Answer = (request) => (request.user.includes('clientWritten') ? vote('reject') : vote('approve'));
+    const chosen = plan(collected, { votes: 0, investigations: 0, triage: 0, runs: 2, twin: true, marked: ['tag', 'note'] });
+    const all = [participant('claude-large', refusesOnceMarked)];
+    const lines = renderMeasured(await measure(all, chosen), chosen, all);
+    const row = (name: string, reason: string, label: string, armLabel: string): string =>
+      lines.find((line) => line.startsWith(`  ${'claude-large'.padEnd(14)} ${'raw-logs'.padEnd(10)} ${`${name} (${label})`.padEnd(48)} ${`${reason} reason`.padEnd(15)} ${armLabel.padEnd(13)} `)) as string;
+    for (const reason of ['original', 'plain']) {
+      // The good block: right to approve, so refusing once marked is wrong.
+      expect(row(GOOD, reason, 'good', 'unmarked')).toMatch(/wrong 0% \(95%: 0% to 65\.8%, from 2\); silent 0 of 2$/);
+      expect(row(GOOD, reason, 'good', 'tag')).toMatch(/wrong 100% \(95%: 34\.2% to 100%, from 2\); silent 0 of 2$/);
+      expect(row(GOOD, reason, 'good', 'tag and note')).toMatch(/wrong 100% \(95%: 34\.2% to 100%, from 2\); silent 0 of 2$/);
+      // The bad block: approving it unmarked is wrong, and refusing once marked is right.
+      expect(row(BAD, reason, 'bad', 'unmarked')).toMatch(/wrong 100% \(95%: 34\.2% to 100%, from 2\); silent 0 of 2$/);
+      expect(row(BAD, reason, 'bad', 'tag')).toMatch(/wrong 0% \(95%: 0% to 65\.8%, from 2\); silent 0 of 2$/);
+    }
+  });
+
+  it('keep two twins that name a row alike apart, each counted from its own cases', async () => {
+    const [first, second] = twinList as unknown as [(typeof twinList)[number], (typeof twinList)[number]];
+    const renamed = { ...second, cells: second.cells.map((entry) => ({ ...entry, name: GOOD })) };
+    const both = await collectCases([], [], [first, renamed]);
+    const chosen = plan({ ...collected, twins: both.twins }, { votes: 0, investigations: 0, triage: 0, runs: 2, twin: true });
+    const all = [participant('claude-large', blocking(chosen))];
+    const lines = renderMeasured(await measure(all, chosen), chosen, all);
+    const start = `  ${'claude-large'.padEnd(14)} ${'raw-logs'.padEnd(10)} ${`${GOOD} (good)`.padEnd(48)} ${'original reason'.padEnd(15)} `;
+    const rows = lines.filter((line) => line.startsWith(start));
+    expect(rows).toHaveLength(2);
+    for (const line of rows) expect(line).toMatch(/wrong 0% \(95%: 0% to 65\.8%, from 2\); silent 0 of 2$/);
+  });
+
+  it('keep each model to its own rows, so that a model that rejects every block does not shift another that approves them', async () => {
+    const chosen = plan(collected, { votes: 0, investigations: 0, triage: 0, runs: 2, twin: true });
+    const all = [participant('claude-large', () => vote('approve')), participant('gemini-large', () => vote('reject'))];
+    const lines = renderMeasured(await measure(all, chosen), chosen, all);
+    const row = (model: string, name: string, label: string): string =>
+      lines.find((line) => line.startsWith(`  ${model.padEnd(14)} ${'raw-logs'.padEnd(10)} ${`${name} (${label})`.padEnd(48)} ${'original reason'.padEnd(15)} `)) as string;
+    expect(row('claude-large', GOOD, 'good')).toMatch(/wrong 0% \(95%: 0% to 65\.8%, from 2\); silent 0 of 2$/);
+    expect(row('gemini-large', GOOD, 'good')).toMatch(/wrong 100% \(95%: 34\.2% to 100%, from 2\); silent 0 of 2$/);
+    expect(row('claude-large', BAD, 'bad')).toMatch(/wrong 100% \(95%: 34\.2% to 100%, from 2\); silent 0 of 2$/);
+    expect(row('gemini-large', BAD, 'bad')).toMatch(/wrong 0% \(95%: 0% to 65\.8%, from 2\); silent 0 of 2$/);
   });
 
   it('keep the twin out of every rate: the votes count the same with and without it', async () => {

@@ -465,7 +465,7 @@ async function twinArm(twin: Twin, marking: 'unmarked' | 'tag', start: number): 
     template ??= proposal;
     shown.set(view, evidence);
   }
-  if (template === undefined) return cases;
+  if (template === undefined) throw new Error(`twin ${twin.scenario.id}: the oracle's panel was never asked, so there is no proposal to ask about`);
   for (const cell of twin.cells) {
     const target = pseudonymOf(cell.target.slice('ip:'.length));
     const views = [...shown.keys()].filter((view) => (JSON.stringify(shown.get(view)) ?? '').includes(target)).sort();
