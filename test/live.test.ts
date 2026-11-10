@@ -1645,6 +1645,19 @@ describe('asking the twin', () => {
     }
   });
 
+  it('keep two twins that name a row alike apart, each counted from its own cases', async () => {
+    const [first, second] = twinList as unknown as [(typeof twinList)[number], (typeof twinList)[number]];
+    const renamed = { ...second, cells: second.cells.map((entry) => ({ ...entry, name: GOOD })) };
+    const both = await collectCases([], [], [first, renamed]);
+    const chosen = plan({ ...collected, twins: both.twins }, { votes: 0, investigations: 0, triage: 0, runs: 2, twin: true });
+    const all = [participant('claude-large', blocking(chosen))];
+    const lines = renderMeasured(await measure(all, chosen), chosen, all);
+    const start = `  ${'claude-large'.padEnd(14)} ${'raw-logs'.padEnd(10)} ${`${GOOD} (good)`.padEnd(48)} ${'original reason'.padEnd(15)} `;
+    const rows = lines.filter((line) => line.startsWith(start));
+    expect(rows).toHaveLength(2);
+    for (const line of rows) expect(line).toMatch(/wrong 0% \(95%: 0% to 65\.8%, from 2\); silent 0 of 2$/);
+  });
+
   it('keep the twin out of every rate: the votes count the same with and without it', async () => {
     const asked = plan(collected, { votes: 16, investigations: 0, triage: 0, runs: 1, twin: true, marked: ['tag', 'note'] });
     const alone = plan(collected, { votes: 16, investigations: 0, triage: 0, runs: 1 });
