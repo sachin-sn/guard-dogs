@@ -296,6 +296,12 @@ describe('the note about attributes the client wrote', () => {
     expect(system.split(CLIENT_WRITTEN_NOTE)).toHaveLength(2);
   });
 
+  it('puts more than one paragraph between them, a blank line apart and in the order given', () => {
+    const split = SYSTEM_PROMPT.lastIndexOf('\n\n');
+    expect(systemPromptWith('First.', 'Second.', 'Third.')).toBe(`${SYSTEM_PROMPT.slice(0, split)}\n\nFirst.\n\nSecond.\n\nThird.${SYSTEM_PROMPT.slice(split)}`);
+    expect(systemPromptWith(' First. ', '\nSecond.\n')).toBe(systemPromptWith('First.', 'Second.'));
+  });
+
   it('says what the list means, and that a block needs support from outside it', () => {
     expect(CLIENT_WRITTEN_NOTE).toMatch(/`clientWritten`/);
     expect(CLIENT_WRITTEN_NOTE).toMatch(/wrote or chose/);

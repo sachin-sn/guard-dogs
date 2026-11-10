@@ -698,6 +698,13 @@ describe('asking each proposal in every view', () => {
     return (request, ask) => (request.user.includes(NOTE) ? vote('approve') : right(request, ask));
   }
 
+  it('asks the votes and their copies with the standard instructions, which no paragraph is added to', async () => {
+    const log: { model: string; request: ModelRequest }[] = [];
+    await measure([participant('claude-large', careful(wide), log)], wide);
+    expect(log).toHaveLength(2 * (16 + wide.variants.length));
+    expect(log.every((call) => call.request.system === SYSTEM_PROMPT)).toBe(true);
+  });
+
   it('asks the copies after the votes in each run, in the view each copy has, and keeps the answers apart from the votes', async () => {
     const log: { model: string; request: ModelRequest }[] = [];
     const measured = await measure([participant('claude-large', careful(wide), log)], wide);
