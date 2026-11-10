@@ -1626,6 +1626,25 @@ describe('asking the twin', () => {
     expect(off.join('\n')).not.toContain('TWIN.');
   });
 
+  it('keep each arm to its own row, so that a model that changes with the marking shows it', async () => {
+    /** Approves every block until it is shown the list, as a model that reads the list as a reason to refuse. */
+    const refusesOnceMarked: Answer = (request) => (request.user.includes('clientWritten') ? vote('reject') : vote('approve'));
+    const chosen = plan(collected, { votes: 0, investigations: 0, triage: 0, runs: 2, twin: true, marked: ['tag', 'note'] });
+    const all = [participant('claude-large', refusesOnceMarked)];
+    const lines = renderMeasured(await measure(all, chosen), chosen, all);
+    const row = (name: string, reason: string, label: string, armLabel: string): string =>
+      lines.find((line) => line.startsWith(`  ${'claude-large'.padEnd(14)} ${'raw-logs'.padEnd(10)} ${`${name} (${label})`.padEnd(48)} ${`${reason} reason`.padEnd(15)} ${armLabel.padEnd(13)} `)) as string;
+    for (const reason of ['original', 'plain']) {
+      // The good block: right to approve, so refusing once marked is wrong.
+      expect(row(GOOD, reason, 'good', 'unmarked')).toMatch(/wrong 0% \(95%: 0% to 65\.8%, from 2\); silent 0 of 2$/);
+      expect(row(GOOD, reason, 'good', 'tag')).toMatch(/wrong 100% \(95%: 34\.2% to 100%, from 2\); silent 0 of 2$/);
+      expect(row(GOOD, reason, 'good', 'tag and note')).toMatch(/wrong 100% \(95%: 34\.2% to 100%, from 2\); silent 0 of 2$/);
+      // The bad block: approving it unmarked is wrong, and refusing once marked is right.
+      expect(row(BAD, reason, 'bad', 'unmarked')).toMatch(/wrong 100% \(95%: 34\.2% to 100%, from 2\); silent 0 of 2$/);
+      expect(row(BAD, reason, 'bad', 'tag')).toMatch(/wrong 0% \(95%: 0% to 65\.8%, from 2\); silent 0 of 2$/);
+    }
+  });
+
   it('keep the twin out of every rate: the votes count the same with and without it', async () => {
     const asked = plan(collected, { votes: 16, investigations: 0, triage: 0, runs: 1, twin: true, marked: ['tag', 'note'] });
     const alone = plan(collected, { votes: 16, investigations: 0, triage: 0, runs: 1 });
