@@ -123,6 +123,8 @@ describe('the twins', () => {
       expect(result.outcome).toBe(entry.scenario.expectedWithOracle);
       expect([result.forbiddenProposed, result.forbiddenApplied, result.leaks, result.unoffered]).toEqual([0, 0, 0, 0]);
       expect(run.calls.filter((call) => call.role === 'dog')).toHaveLength(3);
+      // The proposal the twin cases are built from is the oracle's own: the file is the first thing it quarantines.
+      expect(run.applied.map((applied) => `${applied.kind}:${applied.target}`)).toEqual(['contain.quarantine-file:/var/www/html/uploads/banner-77.php']);
     }
     // The tagged copies are valid too.
     for (const entry of twins) expect(checkScenario(marked(entry.scenario)), entry.scenario.id).toEqual([]);
