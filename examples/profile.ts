@@ -46,7 +46,8 @@
  * `--marked tag`, `--marked note` or `--marked tag,note` (with `--controls`, `--twin`
  * or both) asks the same cases again with the event tagged with the attributes the
  * client wrote (`clientWritten`): `tag` changes nothing else, `note` also adds one
- * paragraph to the reviewer's instructions saying what the tag means. The unmarked
+ * paragraph to the reviewer's instructions saying what the tag means (the paragraph
+ * a `ModelDog` adds by itself; the profile adds it in this arm only). The unmarked
  * cases are asked in the same run, as the baseline, so each arm adds as many
  * calls as the unmarked ones and the report sets the arms side by side.
  *

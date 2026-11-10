@@ -26,8 +26,14 @@ export interface ModelDogOptions {
   client: ModelClient;
   /** A fresh token for each call's block tags. Default: random. Tests pass a fixed one. */
   nonce?: () => string;
-  /** One more paragraph of instructions, after the standard ones (see `systemPromptWith`). Default: none. */
+  /** One more paragraph of instructions, after the standard ones and after the automatic one (see `systemPromptWith`). Default: none. */
   systemNote?: string;
+  /**
+   * Tell the model what an event's `clientWritten` list means whenever the
+   * evidence it is shown carries one (`CLIENT_WRITTEN_NOTE`). Default: true.
+   * Only `false` turns it off, for a test that has to ask without it.
+   */
+  explainClientWritten?: boolean;
 }
 
 export class ModelDog implements Dog {
@@ -37,6 +43,7 @@ export class ModelDog implements Dog {
   private readonly client: ModelClient;
   private readonly nonce: () => string;
   private readonly systemNote: string | undefined;
+  private readonly explainClientWritten: boolean;
 
   constructor(options: ModelDogOptions) {
     if (options.id.length === 0 || options.evidenceView.length === 0) {
@@ -50,10 +57,14 @@ export class ModelDog implements Dog {
     // Checked here, so a bad note is found before the first call and not on it.
     if (options.systemNote !== undefined) systemPromptWith(options.systemNote);
     this.systemNote = options.systemNote;
+    this.explainClientWritten = options.explainClientWritten !== false;
   }
 
   async review(task: DogTask, signal: AbortSignal): Promise<DogOpinion> {
-    const prompt = buildVotePrompt(task, this.evidenceView, this.client.model.maxInputChars, this.nonce(), this.systemNote);
+    const prompt = buildVotePrompt(task, this.evidenceView, this.client.model.maxInputChars, this.nonce(), {
+      explainClientWritten: this.explainClientWritten,
+      ...(this.systemNote === undefined ? {} : { systemNote: this.systemNote }),
+    });
     const reply = await this.client.complete(prompt.request, signal);
     const opinion = parseVerdict(reply);
     if (prompt.truncated && opinion.decision === 'approve') {

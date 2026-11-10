@@ -14,6 +14,7 @@ import {
   measure,
   mostlyFailed,
   plan,
+  profileDog,
   renderMeasured,
   renderPlan,
   tallyInvestigations,
@@ -38,7 +39,7 @@ import type { Scenario } from '../eval/scenario.js';
 import { pseudonymOf, runScenario } from '../eval/harness.js';
 import { block, oracle } from '../eval/sim.js';
 import { main } from '../examples/profile.js';
-import { CLIENT_WRITTEN_NOTE, ModelError, SYSTEM_PROMPT, buildVotePrompt, createModelRegistry, type ModelClient, type ModelErrorKind, type ModelRequest } from '../src/index.js';
+import { CLIENT_WRITTEN_NOTE, ModelError, SYSTEM_PROMPT, buildVotePrompt, createModelRegistry, systemPromptWith, type ModelClient, type ModelErrorKind, type ModelRequest } from '../src/index.js';
 
 const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
 const asRecord = (value: unknown): Record<string, unknown> => (typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {});
@@ -1264,6 +1265,12 @@ describe('asking the controls with the field marked', () => {
       expect(system.startsWith(SYSTEM_PROMPT.slice(0, SYSTEM_PROMPT.indexOf('Reply with one JSON')))).toBe(true);
       expect(system.endsWith('"rationale":"one or two sentences"}')).toBe(true);
     }
+    // The note arm is what a dog sends by itself when it is shown the list; the tag arm would have got the paragraph too, had the profile not switched it off.
+    for (const [i, entry] of chosen.controls.entries()) {
+      const byItself = buildVotePrompt(entry.task, entry.view, 24_000, 'abcdefgh12345678').request.system;
+      expect(log[i]?.request.system, entry.id).toBe(entry.marking === 'note' ? byItself : SYSTEM_PROMPT);
+      if (entry.marking === 'tag') expect(byItself, entry.id).toBe(systemPromptWith(CLIENT_WRITTEN_NOTE));
+    }
     expect(measured.controls.map((record) => record.marking)).toEqual([...Array(6).fill('unmarked'), ...Array(6).fill('tag'), ...Array(6).fill('note')]);
     // What the reviewer sees: the tag is in the evidence of the marked arms and in none of the unmarked.
     expect(log.slice(0, 6).some((call) => call.request.user.includes('clientWritten'))).toBe(false);
@@ -1347,6 +1354,24 @@ describe('asking the controls with the field marked', () => {
     expect(withArms.slice(0, start - 1)).toEqual(without.slice(0, start - 1));
     const measured = await measure(all, chosen);
     for (const record of measured.controls) expect((chosen.controls.find((entry) => entry.id === record.caseId) as ControlCase).marking).toBe(record.marking);
+  });
+});
+
+describe('the dog the profile asks', () => {
+  const tagged = { events: [{ attrs: { client_ip: 'ip_a' }, clientWritten: ['client_ip'] }] };
+  const task = { action: { id: 'a', proposedBy: 'x', level: 3, kind: 'contain.block-source', target: 'ip_a', reason: 'r', evidence: [], createdAt: '2026-10-23T10:16:00Z', reversible: true, ttlSeconds: 900 }, evidence: tagged } as Parameters<ReturnType<typeof profileDog>['review']>[0];
+  const systemFor = async (marking?: 'unmarked' | 'tag' | 'note') => {
+    const log: { model: string; request: ModelRequest }[] = [];
+    const { client } = participant('claude-large', () => '{"decision":"reject"}', log);
+    await profileDog('raw-logs', client, marking).review(task, AbortSignal.timeout(1000));
+    return log[0]?.request.system;
+  };
+
+  it('is told nothing about the list unless the arm says so, even when the evidence shows one', async () => {
+    expect(await systemFor()).toBe(SYSTEM_PROMPT);
+    expect(await systemFor('unmarked')).toBe(SYSTEM_PROMPT);
+    expect(await systemFor('tag')).toBe(SYSTEM_PROMPT);
+    expect(await systemFor('note')).toBe(systemPromptWith(CLIENT_WRITTEN_NOTE));
   });
 });
 
@@ -1524,6 +1549,11 @@ describe('asking the twin', () => {
     }
     expect(log.slice(0, 6).some((call) => call.request.user.includes('clientWritten'))).toBe(false);
     expect(log.slice(6).every((call) => call.request.user.includes('"clientWritten":["client_ip"'))).toBe(true);
+    for (const [i, entry] of chosen.twins.entries()) {
+      const byItself = buildVotePrompt(entry.task, entry.view, 24_000, 'abcdefgh12345678').request.system;
+      expect(log[i]?.request.system, entry.id).toBe(entry.marking === 'note' ? byItself : SYSTEM_PROMPT);
+      if (entry.marking === 'tag') expect(byItself, entry.id).toBe(systemPromptWith(CLIENT_WRITTEN_NOTE));
+    }
     // The records keep what the report needs, and are in the order the cases were asked.
     expect(measured.twins.map((record) => record.caseId)).toEqual(chosen.twins.map((entry) => entry.id));
     for (const record of measured.twins) {

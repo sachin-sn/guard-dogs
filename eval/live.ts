@@ -605,6 +605,22 @@ export interface Participant {
   api?: string;
 }
 
+/**
+ * The dog the profile asks. A `ModelDog` tells the model what a `clientWritten`
+ * list means whenever the evidence has one; the profile measures what that does,
+ * so it adds the paragraph only in an arm that says so (`note`) and never by itself.
+ * An arm marked `tag` shows the list and says nothing about it.
+ */
+export function profileDog(view: string, client: ModelClient, marking?: Marking): ModelDog {
+  return new ModelDog({
+    id: 'profile',
+    evidenceView: view,
+    client,
+    explainClientWritten: false,
+    ...(marking === 'note' ? { systemNote: CLIENT_WRITTEN_NOTE } : {}),
+  });
+}
+
 export type VoteOutcome = 'approve' | 'reject' | 'abstain' | 'failed';
 export type InvestigationOutcome = 'right' | 'none' | 'other' | 'forbidden' | 'unoffered' | 'failed';
 export type TriageOutcome = 'escalate' | 'routine' | 'missing' | 'failed';
@@ -743,7 +759,7 @@ export async function measure(participants: readonly Participant[], chosen: Plan
       for (let run = 1; run <= chosen.runs; run++) {
         if (participant.tier === 'large') {
           for (const entry of chosen.votes) {
-            const dog = new ModelDog({ id: 'profile', evidenceView: entry.view, client: participant.client });
+            const dog = profileDog(entry.view, participant.client);
             await pace();
             try {
               const opinion = await dog.review(structuredClone(entry.task), AbortSignal.timeout(timeoutMs));
@@ -754,7 +770,7 @@ export async function measure(participants: readonly Participant[], chosen: Plan
             finished();
           }
           for (const entry of chosen.variants) {
-            const dog = new ModelDog({ id: 'profile', evidenceView: entry.view, client: participant.client });
+            const dog = profileDog(entry.view, participant.client);
             const seen = { caseId: entry.id, variantOf: entry.variantOf as string, view: entry.view, label: entry.label };
             await pace();
             try {
@@ -766,7 +782,7 @@ export async function measure(participants: readonly Participant[], chosen: Plan
             finished();
           }
           for (const entry of chosen.controls) {
-            const dog = new ModelDog({ id: 'profile', evidenceView: entry.view, client: participant.client, ...(entry.marking === 'note' ? { systemNote: CLIENT_WRITTEN_NOTE } : {}) });
+            const dog = profileDog(entry.view, participant.client, entry.marking);
             const seen = { caseId: entry.id, planted: entry.planted, reason: entry.reason, view: entry.view, marking: entry.marking, label: entry.label };
             await pace();
             try {
@@ -778,7 +794,7 @@ export async function measure(participants: readonly Participant[], chosen: Plan
             finished();
           }
           for (const entry of chosen.twins) {
-            const dog = new ModelDog({ id: 'profile', evidenceView: entry.view, client: participant.client, ...(entry.marking === 'note' ? { systemNote: CLIENT_WRITTEN_NOTE } : {}) });
+            const dog = profileDog(entry.view, participant.client, entry.marking);
             const seen = { caseId: entry.id, cell: entry.cell, reason: entry.reason, view: entry.view, marking: entry.marking, label: entry.label };
             await pace();
             try {

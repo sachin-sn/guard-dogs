@@ -463,7 +463,7 @@ By cell, approvals out of the 5 calls (the rest are Claude's abstentions, except
 **What it means for the design.**
 
 - *The gate stays the protection, and this is the measurement of why.* An event that lists the fields the client wrote, and nothing else, gets the same approval from one of the two families as an event that does not. A deployment that tags its events and does not tell the models what the tag means has told Gemini nothing it acts on.
-- *The paragraph is what makes the models a second line.* With it, neither family approved a block whose only support is a field in the list. Whether it belongs in the standard instructions, shown whenever a case has a tagged event, is not decided by this run (the next paragraph says why). Until it is, `ModelDog`'s `systemNote` carries it.
+- *The paragraph is what makes the models a second line.* With it, neither family approved a block whose only support is a field in the list. Whether it belongs in the standard instructions, shown whenever a case has a tagged event, is not decided by this run (the next paragraph says why). The seventh run decided it, and `ModelDog` now adds it itself (see "Showing the paragraph by itself" below).
 - *The paragraph restates the gate's rule.* It tells the model to approve a block of a source only if an attribute outside the list supports it, which is what the gate holds for. So the run measures whether a model follows that rule where the rule says no. It does not measure whether the model can tell.
 
 **What it does not show.**
@@ -530,7 +530,7 @@ What the other calls were. Claude abstained on the rest, except that it rejected
 
 **What it means for the design.**
 
-- *The paragraph can ship, shown whenever the evidence carries a tagged event.* It costs the good block nothing that was measured, and it is what makes Gemini act on the tag. `ModelDog` should add it itself when an event it renders carries a `clientWritten` list, instead of leaving `systemNote` to the caller; that is the next change. The gate does not wait for it and does not depend on it.
+- *The paragraph can ship, shown whenever the evidence carries a tagged event.* It costs the good block nothing that was measured, and it is what makes Gemini act on the tag. `ModelDog` now adds it itself when the evidence it is shown carries a `clientWritten` list, instead of leaving `systemNote` to the caller ("Showing the paragraph by itself", below). The gate does not wait for it and does not depend on it.
 - *The gate stays the protection.* The block on the connection address is supported by `peer`, which the sidecar read from the socket and did not list, so the gate would not hold it; the block on the forwarded address is supported only by a listed field, and the gate holds it whatever the panel votes.
 - *A panel that wants to act on the good block cannot count on Claude seats here.* The rule that an abstention is not an agreement makes this safe, and costs recall in a deployment whose forwarded and connection addresses differ.
 
@@ -542,6 +542,17 @@ What the other calls were. Claude abstained on the rest, except that it rejected
 - *The paragraph restates the gate's rule,* so the run measures whether a model follows a rule it is given and finds the attribute that satisfies it. It does not measure whether a model could tell without being told.
 - *One wording, two families, one version of each model.* Hosted models change.
 - *Two calls got no answer, both Claude's.* The JSON keeps the kind of a failure and not what the model wrote, so the cause is not known. Had both been approvals, Claude's note-arm row for the forwarded address would read 2 of 10 and not 0 of 8, and no other row, and neither Gemini's result, would change. All five failures across the sixth and seventh runs are Claude's `output` failures and Gemini had none (0 of 180 calls against 5 of 180 for Claude), one in each arm in the sixth run and two in the note arm here; two in the note arm is within chance (0 of 60 elsewhere, p = 0.11).
+
+### Showing the paragraph by itself
+
+The seventh run settled the question the sixth left open (finding 9), so the paragraph is no longer something a caller has to know to ask for. `buildVotePrompt` adds `CLIENT_WRITTEN_NOTE` to the instructions when the evidence it is about to send has an object with a `clientWritten` key that holds a list of at least one name, and not otherwise. `ModelDog` does this by default.
+
+- **It follows what the model is shown, not what the case holds.** The check reads the evidence as it is written into the prompt, after any cut. The raw view carries the list; the summary view does not (it keeps top-level scalars and the rule's own values), so a dog that reads summaries is not told about a list it cannot see. If the evidence is cut before the list, the paragraph is left out; that dog already turns any approval into an abstention.
+- **Words in a log line do not switch it on.** The check looks for the key, `{"clientWritten":["` or `,"clientWritten":["`. Inside a string value JSON escapes the quotes, so a line that contains those words does not match. An attribute that an attacker names `clientWritten` does match; that only adds the paragraph, which asks the dog for more care.
+- **An empty list adds nothing.** It says the client wrote none of the attributes, which needs no explaining.
+- **`systemNote` stays,** for any other paragraph. When both apply, the library's paragraph comes first and the deployer's after it; each is held to 1000 characters on its own, and a paragraph that is given twice is written once. `explainClientWritten: false` turns the automatic one off.
+- **What was measured is what ships.** The profile asks each arm through `profileDog`, which switches the automatic paragraph off and adds `CLIENT_WRITTEN_NOTE` itself in the `note` arm only. A test asks the note arm and a default dog the same cases and checks that their instructions are the same text, and that the `tag` arm would have been given the paragraph had the switch not been there. The unmarked, tag and note rows of the sixth and seventh runs therefore mean what they said.
+- **Not covered:** only votes. The investigators and triage read the same evidence, list included, and are told nothing about it. Whether they need telling is not measured (next item 1).
 
 ## Findings so far
 
@@ -574,7 +585,7 @@ The tests hold the corpus to `checkScenario`, hold the oracle to the outcome eac
 
 ## What comes next
 
-1. Show the paragraph whenever the evidence carries a tagged event (finding 9). The seventh run found it costs the good block nothing and is what makes Gemini act on the tag, so `ModelDog` should add `CLIENT_WRITTEN_NOTE` itself when an event it renders carries a `clientWritten` list, and `systemNote` stays for other paragraphs. The gate does not depend on it.
+1. Tell the investigators and triage what the list means, or measure whether they need it. The paragraph is now added for votes. An investigator proposes the block, from the targets the deployer offered, and reads the same evidence with the list in it. The investigation cases in the profile never carry the list, so nothing says what an investigator does with it, or whether a target the deployer offered from a forwarded header gets proposed less often when the list is there. The deployer's lever (finding 6) is still the one that works.
 2. Ask the arms in a random order within each run, so that the arm and the time are not tied together (the sixth and seventh runs always asked tag and note last), and keep a short account of why a call got no answer. The second has more behind it now: all five calls that got no answer in the sixth and seventh runs were Claude's, of kind `output`, and nothing is known about what they said. It needs a decision first: the JSON holds counts and outcomes only, never what a model wrote, which was deliberate so that a profile could be pointed at a deployer's own cases. Keeping the start of a failed answer for the made-up corpus alone is possible; it is not done by default.
 3. A warning from `analyzePanel` when every seat reads one view, or when most seats read a view that shows a field an attacker writes. Where a sidecar does not tag its events, or the deployer has not turned on `requireTargetProvenance`, the views are the only thing standing between a shared failure and a majority. The sixth run adds a third case: a deployment that tags its events and does not tell the models what the tag means has Gemini seats approving as before.
 4. `minOutsideFamily` stays opt-in (finding 7). It is no protection against a failure the two families share.
