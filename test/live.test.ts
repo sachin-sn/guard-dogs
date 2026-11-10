@@ -1534,6 +1534,14 @@ describe('asking the twin', () => {
     expect(measured.controls).toEqual([]);
   });
 
+  it('refuse a twin whose event the oracle does not escalate, instead of asking nothing and saying nothing', async () => {
+    const first = twinList[0] as (typeof twinList)[number];
+    const quiet = { ...first, scenario: { ...first.scenario, id: 'twin-quiet', markers: ['nothing-in-the-event-says-this'] } };
+    await expect(collectCases([], [], [quiet])).rejects.toThrow('twin twin-quiet: the oracle\'s panel was never asked, so there is no proposal to ask about');
+    expect((await collectCases([], [], [first])).twins).toHaveLength(12);
+    expect((await collectCases([], [], [])).twins).toEqual([]);
+  });
+
   it('keep a call that fails as a record with no answer, and never as a vote', async () => {
     const chosen = plan(collected, { votes: 0, investigations: 0, triage: 0, runs: 1, twin: true });
     const measured = await measure(
