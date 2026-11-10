@@ -1534,6 +1534,16 @@ describe('asking the twin', () => {
     expect(measured.controls).toEqual([]);
   });
 
+  it('wait for the gap before every call but the first, like every other kind of case', async () => {
+    const chosen = plan(collected, { votes: 0, investigations: 0, triage: 0, runs: 2, twin: true });
+    const sleeps: number[] = [];
+    let time = 1_000;
+    const clock: Clock = { now: () => time, sleep: async (ms) => { sleeps.push(ms); time += ms; } };
+    await measure([participant('claude-large', blocking(chosen))], chosen, { minGapMs: 500, clock });
+    // 2 runs of 6 cases: 12 calls, 11 waits.
+    expect(sleeps).toEqual(Array(11).fill(500));
+  });
+
   it('refuse a twin whose event the oracle does not escalate, instead of asking nothing and saying nothing', async () => {
     const first = twinList[0] as (typeof twinList)[number];
     const quiet = { ...first, scenario: { ...first.scenario, id: 'twin-quiet', markers: ['nothing-in-the-event-says-this'] } };
