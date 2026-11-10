@@ -42,22 +42,52 @@ export const SYSTEM_PROMPT = `${PROMPT_BODY}\n\n${PROMPT_REPLY}`;
 
 /**
  * What an event's `clientWritten` list means, for a dog that is to act on it.
- * Not part of `SYSTEM_PROMPT`: whether a model needs telling, or the list is
- * enough, is what the live profile measures (`--marked`, docs/evaluation.md).
+ * `buildVotePrompt` adds it to the instructions whenever the evidence it shows
+ * carries such a list (`showsClientWritten`), and only then, so it never
+ * refers to a list the model cannot see. The seventh live run (docs/evaluation.md,
+ * "The seventh run (the twin)") is why it is there: with the paragraph, Gemini
+ * stopped approving a block whose only support is a field the client wrote, and
+ * the good block, on the address of the connection, was not made worse for it.
+ * `ModelDog` can switch the addition off (`explainClientWritten: false`); the
+ * live profile does, so that an arm without the paragraph is asked without it.
  */
 export const CLIENT_WRITTEN_NOTE =
   'Some events list `clientWritten`: the names of the attributes in that event whose values the client of the request wrote or chose. Whoever is attacking the service may have set any of them to anything, including the address of someone else, so a value that only such an attribute supports says nothing about who is attacking. Approve a block of a source only if an attribute outside that list supports it.';
 
 const MAX_NOTE = 1000;
 
-/** The instructions with one more paragraph, before the line that says how to reply. */
-export function systemPromptWith(note: string): string {
-  // The cap bounds what reaches the prompt, so it counts the text without its padding.
-  const text = typeof note === 'string' ? note.trim() : '';
-  if (text.length === 0 || text.length > MAX_NOTE) {
-    throw new RangeError(`the system note must be 1 to ${MAX_NOTE} characters`);
+/**
+ * The instructions with more paragraphs, before the line that says how to
+ * reply, in the order given. A paragraph that comes twice (the same text, once
+ * trimmed) is written once.
+ */
+export function systemPromptWith(note: string, ...more: string[]): string {
+  const texts: string[] = [];
+  for (const each of [note, ...more]) {
+    // The cap bounds what reaches the prompt, so it counts the text without its padding.
+    const text = typeof each === 'string' ? each.trim() : '';
+    if (text.length === 0 || text.length > MAX_NOTE) {
+      throw new RangeError(`the system note must be 1 to ${MAX_NOTE} characters`);
+    }
+    if (!texts.includes(text)) texts.push(text);
   }
-  return `${PROMPT_BODY}\n\n${text}\n\n${PROMPT_REPLY}`;
+  return `${PROMPT_BODY}\n\n${texts.join('\n\n')}\n\n${PROMPT_REPLY}`;
+}
+
+// The key of an object, so the same words inside a string (which JSON writes with escaped quotes) do not count.
+const CLIENT_WRITTEN_KEY = /[{,]"clientWritten":\["/;
+
+/**
+ * Whether evidence, written out as `safeJson` writes it, has a `clientWritten`
+ * key holding a list with at least one name. An empty list says the client wrote
+ * none of the attributes, which needs no explaining. A log line that contains
+ * the words does not count: inside a string the quotes are escaped.
+ *
+ * An attribute that an attacker names `clientWritten` does count. That can only
+ * add the paragraph, which asks the dog for more care, not less.
+ */
+export function showsClientWritten(evidenceText: string): boolean {
+  return CLIENT_WRITTEN_KEY.test(evidenceText);
 }
 
 export interface VotePrompt {
@@ -83,7 +113,17 @@ export function newNonce(): string {
   return randomBytes(12).toString('hex');
 }
 
-export function buildVotePrompt(task: DogTask, view: string, maxEvidenceChars: number, nonce: string, systemNote?: string): VotePrompt {
+export interface PromptOptions {
+  /** One more paragraph of instructions, after the standard ones and after the automatic one (see `systemPromptWith`). Default: none. */
+  systemNote?: string;
+  /**
+   * Add `CLIENT_WRITTEN_NOTE` when the evidence that is shown lists attributes
+   * the client wrote. Default: true. Only `false` turns it off.
+   */
+  explainClientWritten?: boolean;
+}
+
+export function buildVotePrompt(task: DogTask, view: string, maxEvidenceChars: number, nonce: string, options: PromptOptions = {}): VotePrompt {
   if (!/^[A-Za-z0-9]{8,64}$/.test(nonce)) throw new RangeError('the nonce must be 8 to 64 letters or digits');
   if (!Number.isInteger(maxEvidenceChars) || maxEvidenceChars < 1) throw new RangeError('maxEvidenceChars must be a positive whole number');
 
@@ -109,6 +149,11 @@ export function buildVotePrompt(task: DogTask, view: string, maxEvidenceChars: n
     truncated = true;
   }
 
+  // What the model is shown decides whether it is told what the list means: a list that was cut away is not mentioned.
+  const notes: string[] = [];
+  if (options.explainClientWritten !== false && showsClientWritten(evidence)) notes.push(CLIENT_WRITTEN_NOTE);
+  if (options.systemNote !== undefined) notes.push(options.systemNote);
+
   const user = [
     "Proposal (the kind, level and target were checked by the system's policy; the reason and references are the proposer's own claims):",
     `<proposal-${nonce}>`,
@@ -123,5 +168,6 @@ export function buildVotePrompt(task: DogTask, view: string, maxEvidenceChars: n
     'Vote now. Reply with the JSON object only.',
   ].join('\n');
 
-  return { request: { system: systemNote === undefined ? SYSTEM_PROMPT : systemPromptWith(systemNote), user }, truncated };
+  const [first, ...rest] = notes;
+  return { request: { system: first === undefined ? SYSTEM_PROMPT : systemPromptWith(first, ...rest), user }, truncated };
 }
