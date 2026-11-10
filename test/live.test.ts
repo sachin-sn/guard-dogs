@@ -718,6 +718,9 @@ describe('asking in a random order', () => {
       expect([...asked(shuffledRun, 'claude-small', run)].sort()).toEqual(chosen.triage.map((entry) => entry.id).sort());
     }
     expect([1, 2, 3, 4].filter((run) => asked(shuffledRun, 'claude-large', run).join() !== planned.join()).length).toBeGreaterThanOrEqual(3);
+    // Small models are asked in a random order too: three triage requests have six orders, and one run in six would come out as the plan's.
+    const triageIds = chosen.triage.map((entry) => entry.id).join();
+    expect([1, 2, 3, 4].filter((run) => asked(shuffledRun, 'claude-small', run).join() !== triageIds).length).toBeGreaterThanOrEqual(1);
 
     // The records come in the order that is recorded: votes and investigations each keep their place among their own kind.
     for (const run of [1, 2, 3, 4]) {
@@ -2906,6 +2909,8 @@ describe('npm run profile', () => {
       const seeds = new Set<string>();
       for (let i = 0; i < 3; i++) seeds.add(/seed (\d+)/.exec(orderLine((await run([], BOTH)).lines))?.[1] as string);
       expect(seeds.size).toBe(3);
+      // From the whole range: a seed under a million has one chance in 4,000, so three of them together is not luck.
+      expect(Math.max(...[...seeds].map(Number))).toBeGreaterThan(1_000_000);
     });
 
     it('shows the order in the plan, before anything is sent', async () => {
