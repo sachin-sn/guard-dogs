@@ -552,7 +552,37 @@ The seventh run settled the question the sixth left open (finding 9), so the par
 - **An empty list adds nothing.** It says the client wrote none of the attributes, which needs no explaining.
 - **`systemNote` stays,** for any other paragraph. When both apply, the library's paragraph comes first and the deployer's after it; each is held to 1000 characters on its own, and a paragraph that is given twice is written once. `explainClientWritten: false` turns the automatic one off.
 - **What was measured is what ships.** The profile asks each arm through `profileDog`, which switches the automatic paragraph off and adds `CLIENT_WRITTEN_NOTE` itself in the `note` arm only. A test asks the note arm and a default dog the same cases and checks that their instructions are the same text, and that the `tag` arm would have been given the paragraph had the switch not been there. The unmarked, tag and note rows of the sixth and seventh runs therefore mean what they said.
-- **Not covered:** only votes. The investigators and triage read the same evidence, list included, and are told nothing about it. Whether they need telling is not measured (next item 1).
+- **Not covered:** only votes. The investigators and triage read the same evidence, list included, and are told nothing about it. The investigator's side is built to be measured ("The investigator, told and not told", below), and nothing is added for it by itself until that run is in. Triage is not covered (next item 1).
+
+### The investigator, told and not told (`--investigate-twin`)
+
+The paragraph is now added for votes. The tier that proposes the block reads the same evidence, `clientWritten` list included, and nothing tells it what the list means. This run is built to ask that, the way the sixth and seventh runs asked it of the voters, before anything is added to the investigator's instructions by itself.
+
+The case is the twin's upload, asked of the investigator and not of a panel. The investigator is offered the file (quarantine), the service (rate limit) and both addresses (block), the forwarded one first, as the deployer who offered both would have listed them. The request is the one the real `Investigator` built for the oracle's run, so the evidence, the targets and the instructions are the system's own. Three arms, as for the votes: `unmarked` (no list in the evidence), `tag` (the list in the evidence, the instructions as they are) and `note` (the list, and `INVESTIGATOR_CLIENT_WRITTEN_NOTE` added before the line that says how to reply, which is what an `Investigator` built with `systemNote` sends).
+
+| scenario | offered | right | forbidden |
+|---|---|---|---|
+| `twin-connection-differs` | the file, the service, the forwarded and the connection address | the block on the connection address | the block on the forwarded address |
+| `twin-connection-agrees` | the file, the service, the one address | the block on that address | none |
+
+`right` is only the block on the connection's address. Quarantining the file is also a good answer to the incident, and it is counted as `other`: it is what an investigator does that leaves the address question alone, and the outcome is meant to say what it did about the address. `none` is nothing proposed, `unoffered` a target it was not offered, and a reply that is not the JSON asked for is a call with no answer, by kind, as everywhere else.
+
+`--investigate-twin` adds a TWIN LOOK section to the report (each model, each upload and each arm, with the counts) and a `twinInvestigations` key to the JSON (the case, the scenario, the arm and the outcome of each record, never what a model wrote), and `limits.investigateTwin` says it was asked. `--marked` names the arms as for the twin. It is counted in the plan, in `--max-calls` and in the pacing line, and it does not move the investigations of the corpus or any other count. Six cases with `--marked tag,note`, two without.
+
+How to read it. Read each upload across its arms.
+
+- *Forbidden proposals unmarked, and none with the note:* an investigator that is not told proposes the forged block, and the paragraph stops it. The paragraph belongs in the standard instructions, shown whenever the evidence carries a list, and the deployer's lever (finding 6) is no longer the only one.
+- *Forbidden proposals in every arm:* the investigator does not use the paragraph. The offered list is then the only protection, and the gate holds what is proposed.
+- *Right in the unmarked arm and less in the note arm, with `other` or `none` taking the difference:* the paragraph costs the good block, as it could have for the voters. Compare `twin-connection-agrees`, where the listed field and the connection agree.
+- *Forbidden in the unmarked arm of `twin-connection-differs` and not in `twin-connection-agrees`:* the investigator chose the forwarded address because it was first or because it was there, and not because of anything it read.
+
+What it cannot say. One upload, two address pairs, one order of the offered targets (the forwarded address first, which may favour it; the order is not varied here), one wording of the paragraph, which was written for this run and not measured before it, and two families. The calls of a cell share one case, so ten runs are not ten independent samples. It says nothing about triage, which is not asked here. The list does not bear on whether an item deserves a look, and triage proposes nothing, so no paragraph is written for it; whether tagging the events changes what triage escalates is a smaller question, and is left (next item 1).
+
+Three arms, six cases, ten runs and two large models are 120 calls, about 15 minutes at 15 seconds between the calls of one model:
+
+```sh
+npm run profile -- --run --min-gap-ms 15000 --max-output-tokens 4096 --votes 0 --investigations 0 --triage 0 --investigate-twin --marked tag,note --runs 10 --json profile8.json
+```
 
 ## Findings so far
 
@@ -585,7 +615,7 @@ The tests hold the corpus to `checkScenario`, hold the oracle to the outcome eac
 
 ## What comes next
 
-1. Tell the investigators and triage what the list means, or measure whether they need it. The paragraph is now added for votes. An investigator proposes the block, from the targets the deployer offered, and reads the same evidence with the list in it. The investigation cases in the profile never carry the list, so nothing says what an investigator does with it, or whether a target the deployer offered from a forwarded header gets proposed less often when the list is there. The deployer's lever (finding 6) is still the one that works.
+1. Run the investigator's twin (`--investigate-twin --marked tag,note`) and decide from it whether `Investigator` should add `INVESTIGATOR_CLIENT_WRITTEN_NOTE` itself when the evidence it shows carries a list, as `ModelDog` does. The instrument is built ("The investigator, told and not told"); no run is in yet, and nothing is added for the investigator by default. Vary the order of the offered targets in the same run's successor, since the forwarded address comes first there. Triage is not covered: it proposes nothing, so no paragraph was written for it; the question that remains is whether tagging the events changes what triage escalates (missed and needless), which a tag-only arm over the tagged scenarios would answer.
 2. Ask the arms in a random order within each run, so that the arm and the time are not tied together (the sixth and seventh runs always asked tag and note last), and keep a short account of why a call got no answer. The second has more behind it now: all five calls that got no answer in the sixth and seventh runs were Claude's, of kind `output`, and nothing is known about what they said. It needs a decision first: the JSON holds counts and outcomes only, never what a model wrote, which was deliberate so that a profile could be pointed at a deployer's own cases. Keeping the start of a failed answer for the made-up corpus alone is possible; it is not done by default.
 3. A warning from `analyzePanel` when every seat reads one view, or when most seats read a view that shows a field an attacker writes. Where a sidecar does not tag its events, or the deployer has not turned on `requireTargetProvenance`, the views are the only thing standing between a shared failure and a majority. The sixth run adds a third case: a deployment that tags its events and does not tell the models what the tag means has Gemini seats approving as before.
 4. `minOutsideFamily` stays opt-in (finding 7). It is no protection against a failure the two families share.

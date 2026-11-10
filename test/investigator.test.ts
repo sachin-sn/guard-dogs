@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   AuditLog,
   CONTAIN_KINDS,
+  INVESTIGATOR_CLIENT_WRITTEN_NOTE,
   INVESTIGATOR_SYSTEM_PROMPT,
   Investigator,
   MAX_CASE_EVIDENCE,
@@ -16,6 +17,7 @@ import {
   createModelClient,
   createModelRegistry,
   evaluateAction,
+  investigatorPromptWith,
   parseInvestigationReply,
   withVotes,
   type Case,
@@ -582,6 +584,73 @@ describe('what the model is sent', () => {
     expect(a).toMatchObject({ caseId: 'first', outcome: 'proposal' });
     expect(a.action?.id.startsWith('inv:first:')).toBe(true);
     expect(b).toMatchObject({ caseId: 'second', outcome: 'no-action', reason: 'second' });
+  });
+});
+
+describe('the paragraph about attributes the client wrote, for the investigator', () => {
+  const REPLY = '\n\nReply with one JSON object and nothing else:';
+  const split = INVESTIGATOR_SYSTEM_PROMPT.indexOf(REPLY);
+
+  it('is not in the standard instructions, which end by saying how to reply', () => {
+    expect(INVESTIGATOR_SYSTEM_PROMPT).not.toContain('clientWritten');
+    expect(split).toBeGreaterThan(0);
+    expect(INVESTIGATOR_SYSTEM_PROMPT.indexOf(REPLY, split + 1)).toBe(-1);
+    expect(INVESTIGATOR_SYSTEM_PROMPT.endsWith('"reason":"one or two sentences"}')).toBe(true);
+  });
+
+  it('goes between the standard instructions and the line that says how to reply', () => {
+    const system = investigatorPromptWith(INVESTIGATOR_CLIENT_WRITTEN_NOTE);
+    expect(system).toBe(`${INVESTIGATOR_SYSTEM_PROMPT.slice(0, split)}\n\n${INVESTIGATOR_CLIENT_WRITTEN_NOTE}${INVESTIGATOR_SYSTEM_PROMPT.slice(split)}`);
+    expect(system.split(INVESTIGATOR_CLIENT_WRITTEN_NOTE)).toHaveLength(2);
+    expect(system.startsWith(INVESTIGATOR_SYSTEM_PROMPT.slice(0, split))).toBe(true);
+    expect(system.endsWith(INVESTIGATOR_SYSTEM_PROMPT.slice(split))).toBe(true);
+  });
+
+  it('says what the list means, that a block needs support from outside it, and what to do without that', () => {
+    expect(INVESTIGATOR_CLIENT_WRITTEN_NOTE).toMatch(/`clientWritten`/);
+    expect(INVESTIGATOR_CLIENT_WRITTEN_NOTE).toMatch(/wrote or chose/);
+    expect(INVESTIGATOR_CLIENT_WRITTEN_NOTE).toMatch(/address of someone else/);
+    expect(INVESTIGATOR_CLIENT_WRITTEN_NOTE).toMatch(/Propose a block of a source only if an attribute outside that list supports it/);
+    expect(INVESTIGATOR_CLIENT_WRITTEN_NOTE).toMatch(/choose another target or answer "none"/);
+    expect(INVESTIGATOR_CLIENT_WRITTEN_NOTE.length).toBeLessThanOrEqual(1000);
+  });
+
+  it('puts several paragraphs a blank line apart in the order given, and writes one that comes twice once', () => {
+    expect(investigatorPromptWith('First.', 'Second.', 'Third.')).toBe(`${INVESTIGATOR_SYSTEM_PROMPT.slice(0, split)}\n\nFirst.\n\nSecond.\n\nThird.${INVESTIGATOR_SYSTEM_PROMPT.slice(split)}`);
+    expect(investigatorPromptWith(' First. ', '\nSecond.\n')).toBe(investigatorPromptWith('First.', 'Second.'));
+    expect(investigatorPromptWith('a', 'b', ' a ')).toBe(investigatorPromptWith('a', 'b'));
+    expect(investigatorPromptWith('a', 'b')).not.toBe(investigatorPromptWith('b', 'a'));
+  });
+
+  it('is trimmed, each paragraph must be text of 1 to 1000 characters, and every one is checked', () => {
+    expect(investigatorPromptWith('x'.repeat(1000))).toContain('x'.repeat(1000));
+    expect(investigatorPromptWith(`  \n${'x'.repeat(1000)}\n  `)).toBe(investigatorPromptWith('x'.repeat(1000)));
+    for (const bad of ['', '   ', '\n', 'x'.repeat(1001), `  ${'x'.repeat(1001)}  `, undefined, null, 7, ['a']]) {
+      expect(() => investigatorPromptWith(bad as unknown as string), JSON.stringify(bad)).toThrow(/system note must be 1 to 1000 characters/);
+      expect(() => investigatorPromptWith('fine', bad as unknown as string), JSON.stringify(bad)).toThrow(/system note must be 1 to 1000 characters/);
+    }
+  });
+
+  it('is sent by an investigator that was given it, and the case, the answer and the proposal are as without', async () => {
+    const plain = make(propose());
+    const noted = make(propose(), { systemNote: INVESTIGATOR_CLIENT_WRITTEN_NOTE });
+    const [a, b] = [await plain.investigator.investigate(theCase()), await noted.investigator.investigate(theCase())];
+    expect(plain.seen[0]?.request.system).toBe(INVESTIGATOR_SYSTEM_PROMPT);
+    expect(noted.seen[0]?.request.system).toBe(investigatorPromptWith(INVESTIGATOR_CLIENT_WRITTEN_NOTE));
+    expect(noted.seen[0]?.request.user).toBe(plain.seen[0]?.request.user);
+    expect(b).toEqual(a);
+    // The case is data and cannot reach the instructions.
+    const marked = make(none(), { systemNote: INVESTIGATOR_CLIENT_WRITTEN_NOTE });
+    await marked.investigator.investigate(theCase({ summary: 'SUMMARY-MARKER' }));
+    expect(marked.seen[0]?.request.system).not.toContain('SUMMARY-MARKER');
+  });
+
+  it('refuses a note that cannot be used when the investigator is built, not when it first investigates', () => {
+    const { client } = stub('claude-large', none());
+    for (const bad of ['', '  ', 'x'.repeat(1001), 5]) {
+      expect(() => new Investigator({ id: 'investigator-1', client, systemNote: bad as unknown as string }), JSON.stringify(bad)).toThrow(/system note/);
+    }
+    expect(() => new Investigator({ id: 'investigator-1', client, systemNote: 'Use care.' })).not.toThrow();
   });
 });
 

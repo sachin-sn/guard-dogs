@@ -10,6 +10,7 @@
  *   npm run profile -- --run --votes 0 --investigations 0 --triage 0 --controls --runs 5
  *   npm run profile -- --run --votes 0 --investigations 0 --triage 0 --controls --marked tag,note --runs 5
  *   npm run profile -- --run --votes 0 --investigations 0 --triage 0 --twin --marked tag,note --runs 5
+ *   npm run profile -- --run --votes 0 --investigations 0 --triage 0 --investigate-twin --marked tag,note --runs 5
  *
  * This spends API credit, so nothing is sent without `--run`, and the plan is
  * refused if it is bigger than `--max-calls` (default 300). The default plan is
@@ -43,13 +44,20 @@
  * shows whether the paragraph that makes the models refuse the second also makes
  * them refuse the first.
  *
- * `--marked tag`, `--marked note` or `--marked tag,note` (with `--controls`, `--twin`
- * or both) asks the same cases again with the event tagged with the attributes the
- * client wrote (`clientWritten`): `tag` changes nothing else, `note` also adds one
- * paragraph to the reviewer's instructions saying what the tag means (the paragraph
- * a `ModelDog` adds by itself; the profile adds it in this arm only). The unmarked
- * cases are asked in the same run, as the baseline, so each arm adds as many
- * calls as the unmarked ones and the report sets the arms side by side.
+ * `--investigate-twin` asks the investigator, not the voters, about the twin's
+ * upload: the address of the connection and the address the client wrote are both
+ * offered as targets, and the report (TWIN LOOK) counts which of them it proposes
+ * to block, whether it acts on the file instead, or whether it says nothing.
+ *
+ * `--marked tag`, `--marked note` or `--marked tag,note` (with `--controls`, `--twin`,
+ * `--investigate-twin` or any of them) asks the same cases again with the event
+ * tagged with the attributes the client wrote (`clientWritten`): `tag` changes
+ * nothing else, `note` also adds one paragraph to the reviewer's instructions saying
+ * what the tag means (for a voter, the paragraph a `ModelDog` adds by itself; for the
+ * investigator, the one a deployer passes as `systemNote`; the profile adds each in
+ * this arm only). The unmarked cases are asked in the same run, as the baseline, so
+ * each arm adds as many calls as the unmarked ones and the report sets the arms side
+ * by side.
  *
  * Run `npm run live-check` first: a profile on a model that does not answer
  * measures the outage.
@@ -90,7 +98,9 @@ export async function main(
   if (markedAt !== -1 && (markedRaw === undefined || markedRaw.startsWith('--'))) throw new RangeError('--marked needs tag, note or tag,note');
   const arms = markedRaw === undefined ? [] : markedRaw.split(',');
   for (const arm of arms) if (arm !== 'tag' && arm !== 'note') throw new RangeError('--marked needs tag, note or tag,note');
-  if (arms.length > 0 && !args.includes('--controls') && !args.includes('--twin')) throw new RangeError('--marked needs --controls or --twin');
+  if (arms.length > 0 && !args.includes('--controls') && !args.includes('--twin') && !args.includes('--investigate-twin')) {
+    throw new RangeError('--marked needs --controls, --twin or --investigate-twin');
+  }
 
   const limits: Limits = {
     votes: whole(args, '--votes', 0) ?? DEFAULT_LIMITS.votes,
@@ -100,6 +110,7 @@ export async function main(
     ...(args.includes('--all-views') ? { allViews: true } : {}),
     ...(args.includes('--controls') ? { controls: true } : {}),
     ...(args.includes('--twin') ? { twin: true } : {}),
+    ...(args.includes('--investigate-twin') ? { investigateTwin: true } : {}),
     ...(arms.length > 0 ? { marked: [...new Set(arms)] as ('tag' | 'note')[] } : {}),
   };
   if (limits.runs > MAX_RUNS) throw new RangeError(`--runs is at most ${MAX_RUNS}`);
@@ -142,7 +153,7 @@ export async function main(
   for (const line of renderPlan(chosen, participants)) print(line);
   if (minGapMs !== undefined && minGapMs > 0) {
     // The longest queue: a large model's votes and investigations, or a small model's triage requests, once for each run.
-    const longest = Math.max(large > 0 ? (chosen.votes.length + chosen.variants.length + chosen.controls.length + chosen.twins.length + chosen.investigations.length) * limits.runs : 0, participants.length > large ? chosen.triage.length * limits.runs : 0);
+    const longest = Math.max(large > 0 ? (chosen.votes.length + chosen.variants.length + chosen.controls.length + chosen.twins.length + chosen.twinInvestigations.length + chosen.investigations.length) * limits.runs : 0, participants.length > large ? chosen.triage.length * limits.runs : 0);
     print(`  pacing:         at least ${minGapMs} ms between one model's calls, so the slowest model takes at least ${Math.ceil((longest * minGapMs) / 60_000)} minutes`);
   }
   if (calls > maxCalls) {
