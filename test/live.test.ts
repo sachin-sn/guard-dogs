@@ -1789,6 +1789,7 @@ describe('asking the investigator about the twins', () => {
 
   it('is not asked unless asked for, and then in the arms that are named, with the unmarked ones as the baseline', () => {
     expect(plan(collected, base).twinInvestigations).toEqual([]);
+    expect(plan(collected, { ...base, investigateTwin: false }).twinInvestigations).toEqual([]);
     const markings = (extra: Partial<Parameters<typeof plan>[1]>): string[] => plan(collected, { ...base, investigateTwin: true, ...extra }).twinInvestigations.map((entry) => entry.marking);
     expect(markings({})).toEqual(['unmarked', 'unmarked']);
     expect(markings({ marked: ['tag'] })).toEqual(['unmarked', 'unmarked', 'tag', 'tag']);
