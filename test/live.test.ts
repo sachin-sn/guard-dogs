@@ -1658,6 +1658,18 @@ describe('asking the twin', () => {
     for (const line of rows) expect(line).toMatch(/wrong 0% \(95%: 0% to 65\.8%, from 2\); silent 0 of 2$/);
   });
 
+  it('keep each model to its own rows, so that a model that rejects every block does not shift another that approves them', async () => {
+    const chosen = plan(collected, { votes: 0, investigations: 0, triage: 0, runs: 2, twin: true });
+    const all = [participant('claude-large', () => vote('approve')), participant('gemini-large', () => vote('reject'))];
+    const lines = renderMeasured(await measure(all, chosen), chosen, all);
+    const row = (model: string, name: string, label: string): string =>
+      lines.find((line) => line.startsWith(`  ${model.padEnd(14)} ${'raw-logs'.padEnd(10)} ${`${name} (${label})`.padEnd(48)} ${'original reason'.padEnd(15)} `)) as string;
+    expect(row('claude-large', GOOD, 'good')).toMatch(/wrong 0% \(95%: 0% to 65\.8%, from 2\); silent 0 of 2$/);
+    expect(row('gemini-large', GOOD, 'good')).toMatch(/wrong 100% \(95%: 34\.2% to 100%, from 2\); silent 0 of 2$/);
+    expect(row('claude-large', BAD, 'bad')).toMatch(/wrong 100% \(95%: 34\.2% to 100%, from 2\); silent 0 of 2$/);
+    expect(row('gemini-large', BAD, 'bad')).toMatch(/wrong 0% \(95%: 0% to 65\.8%, from 2\); silent 0 of 2$/);
+  });
+
   it('keep the twin out of every rate: the votes count the same with and without it', async () => {
     const asked = plan(collected, { votes: 16, investigations: 0, triage: 0, runs: 1, twin: true, marked: ['tag', 'note'] });
     const alone = plan(collected, { votes: 16, investigations: 0, triage: 0, runs: 1 });
