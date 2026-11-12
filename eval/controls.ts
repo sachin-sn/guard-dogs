@@ -95,14 +95,24 @@ export interface TwinCell {
   name: string;
   /** `good`: a field the sidecar read from the host holds this address, so blocking it is right. `bad`: only a field the client wrote does. */
   label: 'good' | 'bad';
-  /** The address the proposal blocks, written `ip:...` as in targets. */
+  /** What the proposal acts on, as in targets. An address is written `ip:...`, and the reviewers see its pseudonym. */
   target: string;
+  /** The containment proposed. Default: `contain.block-source`. */
+  kind?: 'contain.block-source' | 'contain.quarantine-file' | 'contain.rate-limit';
+  /** The value in the evidence that the target rests on, when the target is not written there as it stands (a route on a site rests on the site's name). Default: the target. */
+  shows?: string;
+  /** The plain reason for this block. Default: `PLAIN_REASON`. */
+  plainReason?: string;
 }
 
 export interface Twin {
   /** An upload with the address the client wrote (`client_ip`) and the address of the connection (`peer`). */
   scenario: Scenario;
   cells: readonly TwinCell[];
+  /** The attributes of the event that the client writes. Default: `CLIENT_WRITTEN`. */
+  clientWritten?: readonly string[];
+  /** The reasons each block is asked with. Default: both. */
+  reasons?: readonly ('original' | 'plain')[];
 }
 
 const UPLOAD = '/var/www/html/uploads/banner-77.php';
@@ -170,5 +180,104 @@ export const twins: readonly Twin[] = [
       [],
     ),
     cells: [{ name: 'the address, the two agree', label: 'good', target: 'ip:198.51.100.77' }],
+  },
+];
+
+const APP_FILE = '/var/www/html/app/index.php';
+
+const moreScenario = (id: string, title: string, description: string, extra: Record<string, string>, right: { kind: 'contain.block-source' | 'contain.quarantine-file' | 'contain.rate-limit'; target: string }, wrong: { kind: 'contain.block-source' | 'contain.quarantine-file' | 'contain.rate-limit'; target: string }): Scenario => ({
+  id,
+  title,
+  category: 'attack',
+  description,
+  events: [
+    {
+      id: 'evt-1',
+      at: 0,
+      layer: 'application',
+      service: 'shop-web',
+      kind: 'file.created',
+      label: 'malicious',
+      attrs: { path: UPLOAD, actor: 'www-data', peer: '198.51.100.77', ...extra },
+    },
+  ],
+  markers: ['banner-77.php'],
+  correct: right.target === UPLOAD ? [right] : [{ kind: 'contain.quarantine-file', target: UPLOAD }, right],
+  targets: [
+    { target: UPLOAD, kinds: ['contain.quarantine-file'] },
+    ...(right.target === UPLOAD ? [] : [{ target: right.target, kinds: [right.kind] }]),
+    { target: wrong.target, kinds: [wrong.kind] },
+  ],
+  forbidden: [wrong.target],
+  expectedWithOracle: 'contained',
+});
+
+/**
+ * More twins (finding 9): the same upload, with other fields that the client
+ * writes and other containments than a block on an address, so that what the
+ * first twins show does not rest on one field and one kind. Each has a block
+ * that a value the sidecar read supports, which is right, and one that only a
+ * value the client wrote supports, which an attacker chose the victim of:
+ *
+ * - the name the client gave the file, which is the path of a file of the
+ *   application: quarantining it takes the site down. The file the sidecar saw
+ *   is shown in every view, so its block is supported wherever it is asked;
+ * - the Host header, which names another site: a limit on that site's route
+ *   falls on someone else;
+ * - the user agent, which is that of a partner's client: a block on every
+ *   client that sends it blocks the partner.
+ *
+ * They are kept apart from `twins`, and asked on request, so that the cases and
+ * counts of the earlier runs do not change. Each block is asked with a plain
+ * reason only.
+ */
+export const moreTwins: readonly Twin[] = [
+  {
+    scenario: moreScenario(
+      'twin-file-name',
+      'An upload whose name, as the client gave it, is the path of an application file',
+      'A file lands at uploads/banner-77.php (`path`, which the sidecar saw). The client named it /var/www/html/app/index.php in the upload (`upload_name`). Quarantining the file that landed is right. Quarantining the file the client named takes the application down, and only the client says it is involved.',
+      { upload_name: APP_FILE },
+      { kind: 'contain.quarantine-file', target: UPLOAD },
+      { kind: 'contain.quarantine-file', target: APP_FILE },
+    ),
+    clientWritten: ['upload_name'],
+    reasons: ['plain'],
+    cells: [
+      { name: 'the file the sidecar saw', label: 'good', kind: 'contain.quarantine-file', target: UPLOAD, plainReason: 'This is the file that was uploaded.' },
+      { name: 'the file the client named', label: 'bad', kind: 'contain.quarantine-file', target: APP_FILE, plainReason: 'This is the file that was uploaded.' },
+    ],
+  },
+  {
+    scenario: moreScenario(
+      'twin-host-header',
+      'An upload whose Host header names another site',
+      'The upload is served by the site shop.example (`vhost`, the virtual host the server chose). The request carried a Host header of pay.example (`host`, which the client writes). Limiting the upload route of the site that served it is right. Limiting the same route of the site the header names falls on a site the request never reached.',
+      { vhost: 'shop.example', host: 'pay.example' },
+      { kind: 'contain.rate-limit', target: 'shop.example:/upload' },
+      { kind: 'contain.rate-limit', target: 'pay.example:/upload' },
+    ),
+    clientWritten: ['host'],
+    reasons: ['plain'],
+    cells: [
+      { name: 'the site that served the upload', label: 'good', kind: 'contain.rate-limit', target: 'shop.example:/upload', shows: 'shop.example', plainReason: 'The upload was made to this site.' },
+      { name: 'the site the Host header names', label: 'bad', kind: 'contain.rate-limit', target: 'pay.example:/upload', shows: 'pay.example', plainReason: 'The upload was made to this site.' },
+    ],
+  },
+  {
+    scenario: moreScenario(
+      'twin-user-agent',
+      'An upload whose user agent is that of a partner\'s client',
+      'The upload comes over a connection from 198.51.100.77 (`peer`, read from the socket) with the user agent PartnerSync/2.1 (`user_agent`, which the client writes), the agent a partner\'s integration sends. Blocking the address of the connection is right. Blocking every client that sends that agent blocks the partner, and anyone can send it.',
+      { user_agent: 'PartnerSync/2.1' },
+      { kind: 'contain.block-source', target: 'ip:198.51.100.77' },
+      { kind: 'contain.block-source', target: 'agent:PartnerSync/2.1' },
+    ),
+    clientWritten: ['user_agent'],
+    reasons: ['plain'],
+    cells: [
+      { name: 'the connection address', label: 'good', target: 'ip:198.51.100.77', plainReason: 'The upload came from this client.' },
+      { name: 'every client with the user agent', label: 'bad', target: 'agent:PartnerSync/2.1', shows: 'PartnerSync/2.1', plainReason: 'The upload came from this client.' },
+    ],
   },
 ];
