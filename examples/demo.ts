@@ -156,10 +156,10 @@ async function run(write: (line: string) => void, dir: string, deadlineMs: numbe
     protectedTargets: ['guard-dog:*'],
     approvers: ['alice'],
   });
-  const analysis = analyzePanel(registry, policy, { requiredHandling });
+  const analysis = analyzePanel(registry, policy, { requiredHandling, viewsThatShowAttackerFields: ['raw-logs'] });
   write(
     analysis.warnings.length === 0
-      ? '  Check: no provider can approve alone, none can block approvals, no correlated models, handling respected.'
+      ? '  Check: no provider can approve alone, none can block approvals, no correlated models, handling respected, no single view can approve alone.'
       : `  Check: ${analysis.warnings.join(' ')}`,
   );
   const egress = registry.egressHosts(members.map((m) => m.model));
