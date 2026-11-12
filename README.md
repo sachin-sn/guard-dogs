@@ -150,6 +150,7 @@ Nothing calls a model or the network. The guard dogs in the demo are scripted st
    npm run profile -- --run --votes 0 --investigations 0 --triage 0 --runs 5 --controls     # ask the forbidden block with the planted note and with nothing planted
    npm run profile -- --run --votes 0 --investigations 0 --triage 0 --runs 5 --controls --marked tag,note   # and with the event listing the attributes the client wrote, with and without a line saying what that means
    npm run profile -- --run --votes 0 --investigations 0 --triage 0 --runs 5 --twin --marked tag,note   # the block that is right (the connection's address) beside the one that is not, in the same arms
+   npm run profile -- --run --votes 0 --investigations 0 --triage 0 --runs 5 --more-twins --marked tag,note   # three more uploads: a file name, a Host header and a user agent the client wrote; a quarantine and a rate limit as well as a block
    npm run profile -- --run --votes 0 --investigations 0 --triage 0 --runs 10 --investigate-twin --marked tag,note   # the investigator asked about the same upload, both addresses offered, in the same arms
    ```
 
