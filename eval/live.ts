@@ -63,6 +63,7 @@ import {
 import { corpus } from './corpus.js';
 import { ORIGINAL_REASON, PLAIN_REASON, controls as controlList, marked, twins as twinList, type Control, type Twin } from './controls.js';
 import { pseudonymOf, runScenario } from './harness.js';
+import { MAX_SEED, shuffled } from './order.js';
 import { panelRisk, percent, seatsFor, type FailureModel, type GateOptions, type Mix } from './risk.js';
 import type { Category, Containment, Scenario } from './scenario.js';
 import { block, credulous, injectable, oracle } from './sim.js';
@@ -759,6 +760,8 @@ export interface Measured {
   twinInvestigations: TwinInvestigationRecord[];
   investigations: InvestigationRecord[];
   triage: TriageRecord[];
+  /** For each model and run, the cases in the order they were asked. */
+  order: OrderRecord[];
 }
 
 /** The clock the pacing uses; tests pass their own. */
@@ -782,6 +785,12 @@ export interface MeasureOptions {
    */
   minGapMs?: number;
   clock?: Clock;
+  /**
+   * Ask each model's cases in a random order, a different one for each model and
+   * each run, fixed by this seed (a whole number from 0 to 4294967295). Default:
+   * none, and the cases are asked in the order the plan lists them.
+   */
+  shuffleSeed?: number;
   /** Called after every call with how many are done and how many there will be. */
   onProgress?: (done: number, total: number) => void;
 }
@@ -804,12 +813,30 @@ function classify(reply: string, entry: InvestigationCase): InvestigationOutcome
   return offered ? 'other' : 'unoffered';
 }
 
+/** One call a model is to make: the case it is for, and what to do with it. */
+interface Step {
+  id: string;
+  ask: () => Promise<void>;
+}
+
+/** The order in which one model was asked its cases in one run. */
+export interface OrderRecord {
+  model: string;
+  run: number;
+  /** Case ids, in the order the calls were made. */
+  calls: string[];
+}
+
 export async function measure(participants: readonly Participant[], chosen: Plan, options: MeasureOptions = {}): Promise<Measured> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const gapMs = options.minGapMs ?? 0;
   if (!Number.isInteger(gapMs) || gapMs < 0) throw new RangeError('minGapMs must be a whole number, 0 or more');
+  const seed = options.shuffleSeed;
+  if (seed !== undefined && (!Number.isInteger(seed) || seed < 0 || seed > MAX_SEED)) {
+    throw new RangeError(`shuffleSeed must be a whole number from 0 to ${MAX_SEED}`);
+  }
   const clock = options.clock ?? realClock;
-  const result: Measured = { votes: [], views: [], controls: [], twins: [], twinInvestigations: [], investigations: [], triage: [] };
+  const result: Measured = { votes: [], views: [], controls: [], twins: [], twinInvestigations: [], investigations: [], triage: [], order: [] };
   const large = participants.filter((participant) => participant.tier === 'large').length;
   const small = participants.length - large;
   const total = callCount(chosen, large, small);
@@ -818,10 +845,11 @@ export async function measure(participants: readonly Participant[], chosen: Plan
     done++;
     options.onProgress?.(done, total);
   };
+  const orders: OrderRecord[][] = participants.map(() => []);
 
   // One queue per model, so no model is asked two things at once; the models run side by side.
   await Promise.all(
-    participants.map(async (participant) => {
+    participants.map(async (participant, index) => {
       const who = (run: number): Who => ({ model: participant.name, family: participant.family, run });
       let earliest = 0;
       const pace = async (): Promise<void> => {
@@ -831,96 +859,127 @@ export async function measure(participants: readonly Participant[], chosen: Plan
         earliest = clock.now() + gapMs;
       };
       for (let run = 1; run <= chosen.runs; run++) {
+        const steps: Step[] = [];
         if (participant.tier === 'large') {
           for (const entry of chosen.votes) {
-            const dog = profileDog(entry.view, participant.client);
-            await pace();
-            try {
-              const opinion = await dog.review(structuredClone(entry.task), AbortSignal.timeout(timeoutMs));
-              result.votes.push({ ...who(run), caseId: entry.id, label: entry.label, outcome: opinion.decision });
-            } catch (error) {
-              result.votes.push({ ...who(run), caseId: entry.id, label: entry.label, outcome: 'failed', failure: why(error) });
-            }
-            finished();
+            steps.push({
+              id: entry.id,
+              ask: async () => {
+                const dog = profileDog(entry.view, participant.client);
+                try {
+                  const opinion = await dog.review(structuredClone(entry.task), AbortSignal.timeout(timeoutMs));
+                  result.votes.push({ ...who(run), caseId: entry.id, label: entry.label, outcome: opinion.decision });
+                } catch (error) {
+                  result.votes.push({ ...who(run), caseId: entry.id, label: entry.label, outcome: 'failed', failure: why(error) });
+                }
+              },
+            });
           }
           for (const entry of chosen.variants) {
-            const dog = profileDog(entry.view, participant.client);
-            const seen = { caseId: entry.id, variantOf: entry.variantOf as string, view: entry.view, label: entry.label };
-            await pace();
-            try {
-              const opinion = await dog.review(structuredClone(entry.task), AbortSignal.timeout(timeoutMs));
-              result.views.push({ ...who(run), ...seen, outcome: opinion.decision });
-            } catch (error) {
-              result.views.push({ ...who(run), ...seen, outcome: 'failed', failure: why(error) });
-            }
-            finished();
+            steps.push({
+              id: entry.id,
+              ask: async () => {
+                const dog = profileDog(entry.view, participant.client);
+                const seen = { caseId: entry.id, variantOf: entry.variantOf as string, view: entry.view, label: entry.label };
+                try {
+                  const opinion = await dog.review(structuredClone(entry.task), AbortSignal.timeout(timeoutMs));
+                  result.views.push({ ...who(run), ...seen, outcome: opinion.decision });
+                } catch (error) {
+                  result.views.push({ ...who(run), ...seen, outcome: 'failed', failure: why(error) });
+                }
+              },
+            });
           }
           for (const entry of chosen.controls) {
-            const dog = profileDog(entry.view, participant.client, entry.marking);
-            const seen = { caseId: entry.id, planted: entry.planted, reason: entry.reason, view: entry.view, marking: entry.marking, label: entry.label };
-            await pace();
-            try {
-              const opinion = await dog.review(structuredClone(entry.task), AbortSignal.timeout(timeoutMs));
-              result.controls.push({ ...who(run), ...seen, outcome: opinion.decision });
-            } catch (error) {
-              result.controls.push({ ...who(run), ...seen, outcome: 'failed', failure: why(error) });
-            }
-            finished();
+            steps.push({
+              id: entry.id,
+              ask: async () => {
+                const dog = profileDog(entry.view, participant.client, entry.marking);
+                const seen = { caseId: entry.id, planted: entry.planted, reason: entry.reason, view: entry.view, marking: entry.marking, label: entry.label };
+                try {
+                  const opinion = await dog.review(structuredClone(entry.task), AbortSignal.timeout(timeoutMs));
+                  result.controls.push({ ...who(run), ...seen, outcome: opinion.decision });
+                } catch (error) {
+                  result.controls.push({ ...who(run), ...seen, outcome: 'failed', failure: why(error) });
+                }
+              },
+            });
           }
           for (const entry of chosen.twins) {
-            const dog = profileDog(entry.view, participant.client, entry.marking);
-            const seen = { caseId: entry.id, cell: entry.cell, reason: entry.reason, view: entry.view, marking: entry.marking, label: entry.label };
-            await pace();
-            try {
-              const opinion = await dog.review(structuredClone(entry.task), AbortSignal.timeout(timeoutMs));
-              result.twins.push({ ...who(run), ...seen, outcome: opinion.decision });
-            } catch (error) {
-              result.twins.push({ ...who(run), ...seen, outcome: 'failed', failure: why(error) });
-            }
-            finished();
+            steps.push({
+              id: entry.id,
+              ask: async () => {
+                const dog = profileDog(entry.view, participant.client, entry.marking);
+                const seen = { caseId: entry.id, cell: entry.cell, reason: entry.reason, view: entry.view, marking: entry.marking, label: entry.label };
+                try {
+                  const opinion = await dog.review(structuredClone(entry.task), AbortSignal.timeout(timeoutMs));
+                  result.twins.push({ ...who(run), ...seen, outcome: opinion.decision });
+                } catch (error) {
+                  result.twins.push({ ...who(run), ...seen, outcome: 'failed', failure: why(error) });
+                }
+              },
+            });
           }
           for (const entry of chosen.twinInvestigations) {
-            await pace();
-            const seen = { caseId: entry.id, scenario: entry.scenario, marking: entry.marking };
-            try {
-              const reply = await participant.client.complete(entry.request, AbortSignal.timeout(timeoutMs));
-              result.twinInvestigations.push({ ...who(run), ...seen, outcome: classify(reply, entry) });
-            } catch (error) {
-              result.twinInvestigations.push({ ...who(run), ...seen, outcome: 'failed', failure: why(error) });
-            }
-            finished();
+            steps.push({
+              id: entry.id,
+              ask: async () => {
+                const seen = { caseId: entry.id, scenario: entry.scenario, marking: entry.marking };
+                try {
+                  const reply = await participant.client.complete(entry.request, AbortSignal.timeout(timeoutMs));
+                  result.twinInvestigations.push({ ...who(run), ...seen, outcome: classify(reply, entry) });
+                } catch (error) {
+                  result.twinInvestigations.push({ ...who(run), ...seen, outcome: 'failed', failure: why(error) });
+                }
+              },
+            });
           }
           for (const entry of chosen.investigations) {
-            await pace();
-            try {
-              const reply = await participant.client.complete(entry.request, AbortSignal.timeout(timeoutMs));
-              result.investigations.push({ ...who(run), caseId: entry.id, category: entry.category, outcome: classify(reply, entry) });
-            } catch (error) {
-              result.investigations.push({ ...who(run), caseId: entry.id, category: entry.category, outcome: 'failed', failure: why(error) });
-            }
-            finished();
+            steps.push({
+              id: entry.id,
+              ask: async () => {
+                try {
+                  const reply = await participant.client.complete(entry.request, AbortSignal.timeout(timeoutMs));
+                  result.investigations.push({ ...who(run), caseId: entry.id, category: entry.category, outcome: classify(reply, entry) });
+                } catch (error) {
+                  result.investigations.push({ ...who(run), caseId: entry.id, category: entry.category, outcome: 'failed', failure: why(error) });
+                }
+              },
+            });
           }
         } else {
           for (const entry of chosen.triage) {
-            const ids = Object.keys(entry.expected);
-            await pace();
-            try {
-              const reply = await participant.client.complete(entry.request, AbortSignal.timeout(timeoutMs));
-              const answers = parseTriageReply(reply, new Set(ids));
-              for (const itemId of ids) {
-                result.triage.push({ ...who(run), caseId: entry.id, itemId, expected: entry.expected[itemId] as 'escalate' | 'routine', outcome: answers.get(itemId)?.decision ?? 'missing' });
-              }
-            } catch (error) {
-              for (const itemId of ids) {
-                result.triage.push({ ...who(run), caseId: entry.id, itemId, expected: entry.expected[itemId] as 'escalate' | 'routine', outcome: 'failed', failure: why(error) });
-              }
-            }
-            finished();
+            steps.push({
+              id: entry.id,
+              ask: async () => {
+                const ids = Object.keys(entry.expected);
+                try {
+                  const reply = await participant.client.complete(entry.request, AbortSignal.timeout(timeoutMs));
+                  const answers = parseTriageReply(reply, new Set(ids));
+                  for (const itemId of ids) {
+                    result.triage.push({ ...who(run), caseId: entry.id, itemId, expected: entry.expected[itemId] as 'escalate' | 'routine', outcome: answers.get(itemId)?.decision ?? 'missing' });
+                  }
+                } catch (error) {
+                  for (const itemId of ids) {
+                    result.triage.push({ ...who(run), caseId: entry.id, itemId, expected: entry.expected[itemId] as 'escalate' | 'routine', outcome: 'failed', failure: why(error) });
+                  }
+                }
+              },
+            });
           }
+        }
+        // The order is fixed by the seed, this model's name and this run, so a model's runs differ from each other and from the other model's.
+        const asked = seed === undefined ? steps : shuffled(steps, `${seed}:${participant.name}:${run}`);
+        (orders[index] as OrderRecord[]).push({ model: participant.name, run, calls: asked.map((step) => step.id) });
+        for (const step of asked) {
+          await pace();
+          await step.ask();
+          finished();
         }
       }
     }),
   );
+  result.order = orders.flat();
   return result;
 }
 
