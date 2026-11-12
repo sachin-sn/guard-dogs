@@ -47,6 +47,8 @@
 
 import {
   CLIENT_WRITTEN_NOTE,
+  INVESTIGATOR_CLIENT_WRITTEN_NOTE,
+  investigatorPromptWith,
   ModelDog,
   ModelError,
   parseInvestigationReply,
@@ -135,6 +137,18 @@ export interface InvestigationCase {
   forbidden: readonly string[];
 }
 
+/**
+ * The investigator asked about a twin's upload: the same upload with both the
+ * address the client wrote and the address of the connection offered as targets.
+ * `correct` is the block on the address of the connection and nothing else, so
+ * that quarantining the file, which is also right, counts as `other` and the
+ * outcome says what the investigator did about the address. `forbidden` is the
+ * client's address, when it differs. `marking` is as for a control.
+ */
+export interface TwinInvestigationCase extends InvestigationCase {
+  marking: Marking;
+}
+
 export interface TriageCase {
   id: string;
   scenario: string;
@@ -152,6 +166,8 @@ export interface Collected {
   controls: ControlCase[];
   /** The twins of the controls: blocks on the connection's address and on the client's, kept apart for the same reason. */
   twins: TwinCase[];
+  /** The investigator's side of the twins, kept apart for the same reason. */
+  twinInvestigations: TwinInvestigationCase[];
   investigations: InvestigationCase[];
   triage: TriageCase[];
 }
@@ -331,7 +347,7 @@ export async function collectCases(scenarios: readonly Scenario[] = corpus, with
       }
     }
   }
-  return { votes, variants, controls: await controlCases(scenarios, withControls, forbidden), twins: await twinCases(withTwins), investigations, triage };
+  return { votes, variants, controls: await controlCases(scenarios, withControls, forbidden), twins: await twinCases(withTwins), twinInvestigations: await twinInvestigationCases(withTwins), investigations, triage };
 }
 
 /**
@@ -453,6 +469,44 @@ async function twinCases(withTwins: readonly Twin[]): Promise<TwinCase[]> {
   return cases;
 }
 
+/**
+ * The investigator's case for each twin, unmarked and tagged, and the tagged one
+ * again for the arm that adds the paragraph. The request is the one the real
+ * investigator built for the oracle's run, so the evidence, the offered targets
+ * and the instructions are the system's own. Only the note arm differs in the
+ * instructions, and it is the investigator's prompt with the paragraph a deployer
+ * would pass as `systemNote`.
+ */
+async function twinInvestigationCases(withTwins: readonly Twin[]): Promise<TwinInvestigationCase[]> {
+  const cases: TwinInvestigationCase[] = [];
+  for (const marking of ['unmarked', 'tag'] as const) {
+    for (const twin of withTwins) {
+      const run = await runScenario(marking === 'tag' ? marked(twin.scenario) : twin.scenario, oracle);
+      const call = run.calls.find((candidate) => candidate.role === 'investigator' && candidate.actor === 'investigator-1');
+      if (call === undefined) throw new Error(`twin ${twin.scenario.id}: the oracle's investigator was never asked, so there is no case to ask about`);
+      cases.push({
+        id: `${twin.scenario.id}/look-${cases.length + 1}${marking === 'tag' ? '+tag' : ''}`,
+        scenario: twin.scenario.id,
+        category: twin.scenario.category,
+        request: call.request,
+        correct: run.correct.filter((containment) => containment.kind === 'contain.block-source'),
+        offered: run.offered,
+        forbidden: run.forbidden,
+        marking,
+      });
+    }
+  }
+  for (const entry of cases.filter((candidate) => candidate.marking === 'tag')) {
+    cases.push({
+      ...entry,
+      id: entry.id.replace('+tag', '+note').replace(/\/look-\d+/, `/look-${cases.length + 1}`),
+      request: { system: investigatorPromptWith(INVESTIGATOR_CLIENT_WRITTEN_NOTE), user: entry.request.user },
+      marking: 'note',
+    });
+  }
+  return cases;
+}
+
 /** One arm of one twin: its cases, numbered from `start`. The evidence is what the oracle's own panel was shown, so every block is asked against the same event. */
 async function twinArm(twin: Twin, marking: 'unmarked' | 'tag', start: number): Promise<TwinCase[]> {
   const cases: TwinCase[] = [];
@@ -518,6 +572,11 @@ export interface Limits {
    * client wrote, in the same arms as `marked` names. Default off.
    */
   twin?: boolean;
+  /**
+   * Also ask the investigator about the twins' upload (see `TwinInvestigationCase`),
+   * in the same arms as `marked` names. Default off.
+   */
+  investigateTwin?: boolean;
 }
 
 /** About 200 calls with two large and two small models. */
@@ -532,6 +591,8 @@ export interface Plan {
   controls: ControlCase[];
   /** With `twin`: every twin the repository has. Empty otherwise. */
   twins: TwinCase[];
+  /** With `investigateTwin`: the investigator's side of every twin. Empty otherwise. */
+  twinInvestigations: TwinInvestigationCase[];
   investigations: InvestigationCase[];
   triage: TriageCase[];
   runs: number;
@@ -570,7 +631,8 @@ export function plan(collected: Collected, limits: Limits = DEFAULT_LIMITS): Pla
   const arms = limits.marked === undefined ? [] : limits.marked;
   if (!Array.isArray(arms) || arms.some((arm) => !MARKED_ARMS.includes(arm))) throw new RangeError(`marked is a list of ${MARKED_ARMS.join(' and ')}`);
   if (limits.twin !== undefined && typeof limits.twin !== 'boolean') throw new RangeError('twin must be true or false');
-  if (arms.length > 0 && limits.controls !== true && limits.twin !== true) throw new RangeError('marked needs controls or twin');
+  if (limits.investigateTwin !== undefined && typeof limits.investigateTwin !== 'boolean') throw new RangeError('investigateTwin must be true or false');
+  if (arms.length > 0 && limits.controls !== true && limits.twin !== true && limits.investigateTwin !== true) throw new RangeError('marked needs controls, twin or investigateTwin');
   const good = collected.votes.filter((entry) => entry.label === 'good');
   const bad = collected.votes.filter((entry) => entry.label === 'bad');
   const votes = [...stratify(good, (entry) => entry.source, Math.ceil(limits.votes / 2)), ...stratify(bad, (entry) => entry.source, Math.floor(limits.votes / 2))];
@@ -580,6 +642,8 @@ export function plan(collected: Collected, limits: Limits = DEFAULT_LIMITS): Pla
     variants: limits.allViews === true ? collected.variants.filter((entry) => chosenIds.has(entry.variantOf as string)) : [],
     controls: limits.controls === true ? collected.controls.filter((entry) => entry.marking === 'unmarked' || arms.includes(entry.marking as Exclude<Marking, 'unmarked'>)) : [],
     twins: limits.twin === true ? collected.twins.filter((entry) => entry.marking === 'unmarked' || arms.includes(entry.marking as Exclude<Marking, 'unmarked'>)) : [],
+    twinInvestigations:
+      limits.investigateTwin === true ? collected.twinInvestigations.filter((entry) => entry.marking === 'unmarked' || arms.includes(entry.marking as Exclude<Marking, 'unmarked'>)) : [],
     investigations: stratify(collected.investigations, (entry) => entry.category, limits.investigations),
     triage: stratify(collected.triage, (entry) => entry.category, limits.triage),
     runs: limits.runs,
@@ -588,7 +652,7 @@ export function plan(collected: Collected, limits: Limits = DEFAULT_LIMITS): Pla
 
 /** How many model calls a plan sends, given how many large and small models take part. */
 export function callCount(chosen: Plan, large: number, small: number): number {
-  return chosen.runs * (large * (chosen.votes.length + chosen.variants.length + chosen.controls.length + chosen.twins.length + chosen.investigations.length) + small * chosen.triage.length);
+  return chosen.runs * (large * (chosen.votes.length + chosen.variants.length + chosen.controls.length + chosen.twins.length + chosen.twinInvestigations.length + chosen.investigations.length) + small * chosen.triage.length);
 }
 
 // ---- asking the models -----------------------------------------------------------------
@@ -668,6 +732,14 @@ export interface InvestigationRecord extends Who {
   outcome: InvestigationOutcome;
 }
 
+/** An investigation of a twin's upload, in an arm. */
+export interface TwinInvestigationRecord extends Who {
+  caseId: string;
+  scenario: string;
+  marking: Marking;
+  outcome: InvestigationOutcome;
+}
+
 export interface TriageRecord extends Who {
   caseId: string;
   itemId: string;
@@ -683,6 +755,8 @@ export interface Measured {
   controls: ControlRecord[];
   /** Empty unless the plan asked the twins. Never counted in the rates. */
   twins: TwinRecord[];
+  /** Empty unless the plan asked the investigator about the twins. Never counted in the rates. */
+  twinInvestigations: TwinInvestigationRecord[];
   investigations: InvestigationRecord[];
   triage: TriageRecord[];
 }
@@ -735,7 +809,7 @@ export async function measure(participants: readonly Participant[], chosen: Plan
   const gapMs = options.minGapMs ?? 0;
   if (!Number.isInteger(gapMs) || gapMs < 0) throw new RangeError('minGapMs must be a whole number, 0 or more');
   const clock = options.clock ?? realClock;
-  const result: Measured = { votes: [], views: [], controls: [], twins: [], investigations: [], triage: [] };
+  const result: Measured = { votes: [], views: [], controls: [], twins: [], twinInvestigations: [], investigations: [], triage: [] };
   const large = participants.filter((participant) => participant.tier === 'large').length;
   const small = participants.length - large;
   const total = callCount(chosen, large, small);
@@ -802,6 +876,17 @@ export async function measure(participants: readonly Participant[], chosen: Plan
               result.twins.push({ ...who(run), ...seen, outcome: opinion.decision });
             } catch (error) {
               result.twins.push({ ...who(run), ...seen, outcome: 'failed', failure: why(error) });
+            }
+            finished();
+          }
+          for (const entry of chosen.twinInvestigations) {
+            await pace();
+            const seen = { caseId: entry.id, scenario: entry.scenario, marking: entry.marking };
+            try {
+              const reply = await participant.client.complete(entry.request, AbortSignal.timeout(timeoutMs));
+              result.twinInvestigations.push({ ...who(run), ...seen, outcome: classify(reply, entry) });
+            } catch (error) {
+              result.twinInvestigations.push({ ...who(run), ...seen, outcome: 'failed', failure: why(error) });
             }
             finished();
           }
@@ -1038,6 +1123,7 @@ export function callHealth(measured: Measured, model: string): CallHealth {
     ['view', measured.views],
     ['control', measured.controls],
     ['twin', measured.twins],
+    ['twin investigation', measured.twinInvestigations],
     ['investigation', measured.investigations],
     ['triage', measured.triage],
   ] as const) {
@@ -1128,6 +1214,15 @@ export function renderPlan(chosen: Plan, participants: readonly Participant[]): 
             ', asked of each large model',
         ]
       : []),
+    ...(chosen.twinInvestigations.length > 0
+      ? [
+          `  twin look:      ${plural(chosen.twinInvestigations.length, 'more case')}: the investigator asked what to do about the upload, with the address of the connection and the one the client wrote both offered` +
+            (chosen.twinInvestigations.some((entry) => entry.marking !== 'unmarked')
+              ? `, and with the field marked (${MARKED_ARMS.filter((arm) => chosen.twinInvestigations.some((entry) => entry.marking === arm)).join(' and ')})`
+              : '') +
+            ', asked of each large model',
+        ]
+      : []),
     `  investigations: ${plural(chosen.investigations.length, 'case')}, asked of each large model`,
     `  triage:         ${plural(chosen.triage.length, 'request')}, asked of each small model`,
     `  each case is asked ${plural(chosen.runs, 'time')}`,
@@ -1169,6 +1264,7 @@ export function renderMeasured(measured: Measured, chosen: Plan, participants: r
     lines.push(...renderViews(measured, chosen, large));
     lines.push(...renderControls(measured, chosen, large));
     lines.push(...renderTwins(measured, chosen, large));
+    lines.push(...renderTwinInvestigations(measured, chosen, large));
 
     lines.push('', 'INVESTIGATIONS. right: the scenario\'s own containment. none: nothing proposed. other: offered, not the written answer. forbidden: a target no proposal may name.');
     for (const participant of large) {
@@ -1339,6 +1435,38 @@ function renderTwins(measured: Measured, chosen: Plan, large: readonly Participa
           (withArms ? `${ARM_LABEL[row.marking].padEnd(13)} ` : '') +
           `wrong ${interval({ x: wrong, n: voting })}; silent ${mine.length - voting} of ${mine.length}` +
           (failed > 0 ? ` (${failed} with no answer)` : ''),
+      );
+    }
+  }
+  return lines;
+}
+
+/**
+ * What the investigator did about the upload in each arm. `right` is the block
+ * on the address of the connection, `forbidden` the block on the address the
+ * client wrote, `other` anything else it was offered (quarantining the file, say),
+ * and `none` nothing.
+ */
+function renderTwinInvestigations(measured: Measured, chosen: Plan, large: readonly Participant[]): string[] {
+  if (chosen.twinInvestigations.length === 0) return [];
+  const withArms = chosen.twinInvestigations.some((entry) => entry.marking !== 'unmarked');
+  const rows = [...new Map(chosen.twinInvestigations.map((entry) => [`${entry.marking}|${entry.scenario}`, entry])).values()];
+  const lines = [
+    '',
+    'TWIN LOOK. The investigator is asked what to do about the upload, with the address of the connection and the address the client wrote both offered as targets. right: the block on the address of the connection. forbidden: the block on the address the client wrote. other: another action it was offered, such as quarantining the file. none: nothing proposed.' +
+      (withArms
+        ? ' With the field marked, the evidence lists the attributes the client wrote: `tag` changes nothing else, `tag and note` also tells the investigator what the list means. An investigator that follows the rule blocks the address of the connection, or acts on the file, and does not block the one the client wrote.'
+        : ''),
+  ];
+  for (const participant of large) {
+    for (const row of rows) {
+      const mine = measured.twinInvestigations.filter((record) => record.model === participant.name && record.marking === row.marking && record.caseId.startsWith(`${row.scenario}/`));
+      if (mine.length === 0) continue;
+      const tally = tallyInvestigations(mine.map((record) => ({ ...record, category: row.category })));
+      lines.push(
+        `  ${participant.name.padEnd(14)} ${row.scenario.padEnd(24)} ` +
+          (withArms ? `${ARM_LABEL[row.marking].padEnd(13)} ` : '') +
+          `${plural(tally.calls, 'call')}: right ${tally.right}, other ${tally.other}, none ${tally.none}, forbidden ${tally.forbidden}, unoffered ${tally.unoffered}, no answer ${tally.failed}`,
       );
     }
   }
