@@ -422,6 +422,9 @@ describe('analyzePanel', () => {
       expect(() => analyzePanel(registry, policy, { viewsThatShowAttackerFields: ['raw', 7 as never] })).toThrow(/must name views/);
       expect(() => analyzePanel(registry, policy, { viewsThatShowAttackerFields: 'raw' as never })).toThrow(/must name views/);
       expect(analyzePanel(registry, policy, { viewsThatShowAttackerFields: [] }).warnings).toEqual([]);
+      // The views are named in order, whatever order the dogs sit in.
+      const reversed = policyOf(seated(['a-1', 'sum'], ['b-1', 'raw'], ['c-1', 'audit']));
+      expect(() => analyzePanel(registry, reversed, { viewsThatShowAttackerFields: ['logs'] })).toThrow('(these are read: audit, raw, sum)');
     });
   });
 
