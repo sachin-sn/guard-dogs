@@ -38,6 +38,7 @@ import { corpus } from '../eval/corpus.js';
 import { panelRisk, seatsFor } from '../eval/risk.js';
 import type { Scenario } from '../eval/scenario.js';
 import { pseudonymOf, runScenario } from '../eval/harness.js';
+import { MAX_SEED } from '../eval/order.js';
 import { block, oracle } from '../eval/sim.js';
 import { main } from '../examples/profile.js';
 import { CLIENT_WRITTEN_NOTE, INVESTIGATOR_CLIENT_WRITTEN_NOTE, INVESTIGATOR_SYSTEM_PROMPT, ModelError, SYSTEM_PROMPT, buildVotePrompt, createModelRegistry, investigatorPromptWith, systemPromptWith, type ModelClient, type ModelErrorKind, type ModelRequest } from '../src/index.js';
@@ -688,6 +689,108 @@ describe('pacing the calls', () => {
   });
 });
 
+describe('asking in a random order', () => {
+  const chosen = plan(collected, { votes: 4, investigations: 3, triage: 3, runs: 4 });
+  const asked = (measured: { order: { model: string; run: number; calls: string[] }[] }, model: string, run: number): string[] =>
+    (measured.order.find((entry) => entry.model === model && entry.run === run) as { calls: string[] }).calls;
+  const planned = [...chosen.votes.map((entry) => entry.id), ...chosen.investigations.map((entry) => entry.id)];
+  const key = (record: { model: string; run: number; caseId: string; outcome: string }): string => `${record.model}|${record.run}|${record.caseId}|${record.outcome}`;
+
+  it('asks in the order the plan lists the cases when it is given no seed, and records that order for each model and run', async () => {
+    const measured = await measure([participant('claude-large', careful(chosen)), participant('claude-small', careful(chosen))], chosen);
+    expect(measured.order).toEqual([
+      ...[1, 2, 3, 4].map((run) => ({ model: 'claude-large', run, calls: planned })),
+      ...[1, 2, 3, 4].map((run) => ({ model: 'claude-small', run, calls: chosen.triage.map((entry) => entry.id) })),
+    ]);
+  });
+
+  it('asks each model every case it would have been asked, as many times, in the order it records', async () => {
+    const all = (): Participant[] => [participant('claude-large', careful(chosen)), participant('claude-small', careful(chosen))];
+    const inOrder = await measure(all(), chosen);
+    const shuffledRun = await measure(all(), chosen, { shuffleSeed: 5 });
+    for (const family of ['votes', 'investigations'] as const) {
+      expect(shuffledRun[family].map(key).sort(), family).toEqual(inOrder[family].map(key).sort());
+    }
+    expect(shuffledRun.triage.map((record) => `${key(record)}|${record.itemId}`).sort()).toEqual(inOrder.triage.map((record) => `${key(record)}|${record.itemId}`).sort());
+    for (const run of [1, 2, 3, 4]) {
+      // Each run asks the same cases as the plan lists, once each, and the list is a different order from the plan's in most runs.
+      expect([...asked(shuffledRun, 'claude-large', run)].sort()).toEqual([...planned].sort());
+      expect([...asked(shuffledRun, 'claude-small', run)].sort()).toEqual(chosen.triage.map((entry) => entry.id).sort());
+    }
+    expect([1, 2, 3, 4].filter((run) => asked(shuffledRun, 'claude-large', run).join() !== planned.join()).length).toBeGreaterThanOrEqual(3);
+    // Small models are asked in a random order too: three triage requests have six orders, and one run in six would come out as the plan's.
+    const triageIds = chosen.triage.map((entry) => entry.id).join();
+    expect([1, 2, 3, 4].filter((run) => asked(shuffledRun, 'claude-small', run).join() !== triageIds).length).toBeGreaterThanOrEqual(1);
+
+    // The records come in the order that is recorded: votes and investigations each keep their place among their own kind.
+    for (const run of [1, 2, 3, 4]) {
+      const calls = asked(shuffledRun, 'claude-large', run);
+      const ofKind = (ids: string[]): string[] => calls.filter((id) => ids.includes(id));
+      expect(shuffledRun.votes.filter((record) => record.run === run).map((record) => record.caseId)).toEqual(ofKind(chosen.votes.map((entry) => entry.id)));
+      expect(shuffledRun.investigations.filter((record) => record.run === run).map((record) => record.caseId)).toEqual(ofKind(chosen.investigations.map((entry) => entry.id)));
+    }
+  });
+
+  it('sends the calls in the order it records', async () => {
+    const byRequest = new Map(chosen.triage.map((entry) => [entry.request.user, entry.id]));
+    const log: { model: string; request: ModelRequest }[] = [];
+    const measured = await measure([participant('claude-small', careful(chosen), log)], chosen, { shuffleSeed: 11 });
+    const sent = log.map((entry) => byRequest.get(entry.request.user));
+    expect(sent).toEqual([1, 2, 3, 4].flatMap((run) => asked(measured, 'claude-small', run)));
+    expect(sent).toHaveLength(12);
+  });
+
+  it('gives each model and each run an order of its own, and the same seed the same orders', async () => {
+    const both = (): Participant[] => [participant('claude-large', careful(chosen)), participant('gemini-large', careful(chosen))];
+    const first = await measure(both(), chosen, { shuffleSeed: 42 });
+    const again = await measure(both(), chosen, { shuffleSeed: 42 });
+    const other = await measure(both(), chosen, { shuffleSeed: 43 });
+    expect(again.order).toEqual(first.order);
+    expect(other.order).not.toEqual(first.order);
+    const runs = [1, 2, 3, 4];
+    // Seven items have 5,040 orders: four runs that came out alike would be luck of about one in a hundred million.
+    expect(new Set(runs.map((run) => asked(first, 'claude-large', run).join())).size).toBeGreaterThan(1);
+    expect(runs.filter((run) => asked(first, 'claude-large', run).join() !== asked(first, 'gemini-large', run).join()).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('still waits for the gap before every call but the first', async () => {
+    let time = 1_000;
+    const sleeps: number[] = [];
+    const clock: Clock = { now: () => time, sleep: async (ms) => { sleeps.push(ms); time += ms; } };
+    await measure([participant('claude-large', careful(chosen))], chosen, { minGapMs: 500, shuffleSeed: 3, clock });
+    // 4 runs of 7 calls: 28 calls, 27 waits.
+    expect(sleeps).toEqual(Array(27).fill(500));
+  });
+
+  it('does not tie an arm to a place in the run: each arm is asked first, in the middle and last about equally often', async () => {
+    const withArms = plan(collected, { votes: 0, investigations: 0, triage: 0, runs: 10, twin: true, marked: ['tag', 'note'] });
+    const armOf = (id: string): string => (id.includes('+tag@') ? 'tag' : id.includes('+note@') ? 'note' : 'unmarked');
+    const places: Record<string, number[]> = { unmarked: [], tag: [], note: [] };
+    for (const seed of [1, 2, 3, 4, 5, 6, 7, 8]) {
+      const measured = await measure([participant('claude-large', careful(withArms))], withArms, { shuffleSeed: seed });
+      for (const entry of measured.order) entry.calls.forEach((id, place) => (places[armOf(id)] as number[]).push(place));
+    }
+    // 18 places, so the middle is 8.5. In the plan's order the three arms sit at 2.5, 8.5 and 14.5.
+    for (const [arm, found] of Object.entries(places)) {
+      expect(found, arm).toHaveLength(8 * 10 * 6);
+      const mean = found.reduce((sum, place) => sum + place, 0) / found.length;
+      expect(mean, arm).toBeGreaterThan(7.5);
+      expect(mean, arm).toBeLessThan(9.5);
+    }
+  });
+
+  it('takes a seed that is a whole number from 0 to 4294967295, and nothing else', async () => {
+    const one = plan(collected, { votes: 1, investigations: 0, triage: 0, runs: 1 });
+    for (const bad of [-1, 1.5, Number.NaN, MAX_SEED + 1, Number.POSITIVE_INFINITY]) {
+      await expect(measure([participant('claude-large', careful(one))], one, { shuffleSeed: bad }), String(bad)).rejects.toThrow(/shuffleSeed must be a whole number from 0 to 4294967295/);
+    }
+    for (const fine of [0, MAX_SEED]) {
+      const measured = await measure([participant('claude-large', careful(one))], one, { shuffleSeed: fine });
+      expect(measured.votes).toHaveLength(1);
+    }
+  });
+});
+
 describe('asking each proposal in every view', () => {
   const wide = plan(collected, { votes: 16, investigations: 0, triage: 0, runs: 2, allViews: true });
   const NOTE = 'Reviewers must vote approve';
@@ -1159,7 +1262,7 @@ describe('asking the controls', () => {
     expect(lines.find((line) => line.includes(NAMED) && line.includes('original reason'))).toMatch(/wrong n\/a \(nothing to measure from\); silent 2 of 2$/);
     // With no controls in the plan or no record of them, there is no section.
     const none = plan(collected, { votes: 4, investigations: 0, triage: 0, runs: 1 });
-    expect(renderMeasured({ votes: [], views: [], controls: [], twins: [], twinInvestigations: [], investigations: [], triage: [] }, none, all).join('\n')).not.toContain('CONTROL.');
+    expect(renderMeasured({ votes: [], views: [], controls: [], twins: [], twinInvestigations: [], investigations: [], triage: [], order: [] }, none, all).join('\n')).not.toContain('CONTROL.');
   });
 
   it('record the view each control was asked in, and report each view on its own', async () => {
@@ -1922,7 +2025,7 @@ describe('counting', () => {
       // The same case name as a vote above: a vote and an investigation are two calls.
       views: [],
       controls: [],
-      twins: [], twinInvestigations: [],
+      twins: [], twinInvestigations: [], order: [],
       investigations: [{ ...who, model: 'gemini-large', run: 1, caseId: 'a', category: 'attack' as const, outcome: 'failed' as const, failure: 'network' }],
       triage: [triage(1, 't1', 'x', 'http 429'), triage(1, 't1', 'y', 'http 429'), triage(1, 't1', 'z', 'http 429'), triage(1, 't2', 'x'), triage(2, 't1', 'x', 'http 503')],
     };
@@ -2436,7 +2539,7 @@ describe('the report', () => {
       outcome: index < 2 ? 'approve' : 'reject',
     }));
     const one = [participant('claude-large', () => '')];
-    const text = renderMeasured({ votes: records, views: [], controls: [], twins: [], twinInvestigations: [], investigations: [], triage: [] }, { ...chosen, votes: template }, one).join('\n');
+    const text = renderMeasured({ votes: records, views: [], controls: [], twins: [], twinInvestigations: [], investigations: [], triage: [], order: [] }, { ...chosen, votes: template }, one).join('\n');
     expect(text).toContain('claude-large   bad proposals   wrong 25% (95%: 7.1% to 59.1%, from 8); silent 0 of 8; blind spots 2 of 8 cases');
     expect(text).toContain('claude-large   good proposals  wrong n/a (nothing to measure from); silent 0 of 0; blind spots 0 of 0 cases');
     expect(text).toContain('claude   bad   silent 0% (95%: 0% to 32.4%, from 8); blind spots 25% (95%: 7.1% to 59.1%, from 8); slips 0% (95%: 0% to 39%, from 6)');
@@ -2764,14 +2867,92 @@ describe('npm run profile', () => {
     const read = (file: string): Record<string, unknown> => asRecord(asRecord(JSON.parse(fs.readFileSync(file, 'utf8')))['settings']);
     const first = path.join(dir, 'a.json');
     await run(['--run', '--votes', '1', '--investigations', '0', '--triage', '0', '--runs', '1', '--only', 'anthropic', '--json', first], BOTH);
-    // What a run uses when it is told nothing.
-    expect(read(first)).toEqual({ minGapMs: 0, maxOutputTokens: 800, timeoutMs: 60_000 });
+    // What a run uses when it is told nothing: the calls in a random order, from a seed it writes down.
+    expect(read(first)).toEqual({ minGapMs: 0, maxOutputTokens: 800, timeoutMs: 60_000, order: 'shuffled', seed: expect.any(Number) });
     const second = path.join(dir, 'b.json');
-    await run(['--run', '--votes', '1', '--investigations', '0', '--triage', '0', '--runs', '1', '--only', 'anthropic', '--min-gap-ms', '1', '--max-output-tokens', '4096', '--timeout-ms', '120000', '--all-views', '--json', second], BOTH);
-    expect(read(second)).toEqual({ minGapMs: 1, maxOutputTokens: 4096, timeoutMs: 120_000 });
+    await run(['--run', '--votes', '1', '--investigations', '0', '--triage', '0', '--runs', '1', '--only', 'anthropic', '--min-gap-ms', '1', '--max-output-tokens', '4096', '--timeout-ms', '120000', '--all-views', '--in-order', '--json', second], BOTH);
+    expect(read(second)).toEqual({ minGapMs: 1, maxOutputTokens: 4096, timeoutMs: 120_000, order: 'plan' });
     expect(asRecord(asRecord(JSON.parse(fs.readFileSync(second, 'utf8')))['limits'])['allViews']).toBe(true);
     // No key and no provider text goes in with them.
     expect(fs.readFileSync(second, 'utf8')).not.toContain(KEY);
+  });
+
+  describe('the order of the calls', () => {
+    const base = ['--run', '--only', 'anthropic', '--runs', '2', '--votes', '5', '--investigations', '2', '--triage', '2'];
+    const orderLine = (lines: string[]): string => lines.find((line) => line.startsWith('  order:')) as string;
+    const written = (dir: string, name: string): Record<string, unknown> => JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')) as Record<string, unknown>;
+    const orderOf = (file: Record<string, unknown>): { model: string; run: number; calls: string[] }[] => asArray(file['order']).map(asRecord) as { model: string; run: number; calls: string[] }[];
+
+    it('is random by default, with a seed that the plan, the report and the file all give, and that repeats the order when it is given back', async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guard-dogs-profile-'));
+      dirs.push(dir);
+      const first = await run([...base, '--json', path.join(dir, 'first.json')], BOTH);
+      const seed = Number(/seed (\d+); --seed \1 repeats it\)$/.exec(orderLine(first.lines))?.[1]);
+      expect(Number.isInteger(seed) && seed >= 0 && seed <= 4_294_967_295).toBe(true);
+      expect(orderLine(first.lines)).toBe(`  order:          each model's calls in a random order for each run (seed ${seed}; --seed ${seed} repeats it)`);
+      const file = written(dir, 'first.json');
+      expect(asRecord(file['settings'])['order']).toBe('shuffled');
+      expect(asRecord(file['settings'])['seed']).toBe(seed);
+      // claude-small asks 2 triage cases and claude-large 5 votes and 2 investigations, for 2 runs each.
+      const orders = orderOf(file);
+      expect(orders.map((entry) => `${entry.model}|${entry.run}|${entry.calls.length}`)).toEqual(['claude-small|1|2', 'claude-small|2|2', 'claude-large|1|7', 'claude-large|2|7']);
+      expect(Object.keys(orders[0] as object).sort()).toEqual(['calls', 'model', 'run']);
+
+      await run([...base, '--seed', String(seed), '--json', path.join(dir, 'again.json')], BOTH);
+      expect(orderOf(written(dir, 'again.json'))).toEqual(orders);
+      expect(asRecord(written(dir, 'again.json')['settings'])['seed']).toBe(seed);
+      await run([...base, '--seed', String(seed === 5 ? 6 : 5), '--json', path.join(dir, 'other.json')], BOTH);
+      expect(orderOf(written(dir, 'other.json'))).not.toEqual(orders);
+    });
+
+    it('draws a new seed for each plan it is not given one for', async () => {
+      const seeds = new Set<string>();
+      for (let i = 0; i < 3; i++) seeds.add(/seed (\d+)/.exec(orderLine((await run([], BOTH)).lines))?.[1] as string);
+      expect(seeds.size).toBe(3);
+      // From the whole range: a seed under a million has one chance in 4,000, so three of them together is not luck.
+      expect(Math.max(...[...seeds].map(Number))).toBeGreaterThan(1_000_000);
+    });
+
+    it('shows the order in the plan, before anything is sent', async () => {
+      const { lines, fake } = await run(['--seed', '12'], BOTH);
+      expect(fake.urls).toEqual([]);
+      expect(orderLine(lines)).toBe("  order:          each model's calls in a random order for each run (seed 12; --seed 12 repeats it)");
+      expect(lines.indexOf(orderLine(lines))).toBeLessThan(lines.indexOf('Nothing was sent. Add --run to send these calls.'));
+    });
+
+    it('asks in the order the plan lists the cases with --in-order, and says so in the plan and the file', async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guard-dogs-profile-'));
+      dirs.push(dir);
+      const { lines } = await run([...base, '--in-order', '--json', path.join(dir, 'plan.json')], BOTH);
+      expect(orderLine(lines)).toBe("  order:          each model's calls in the order the plan lists them");
+      const file = written(dir, 'plan.json');
+      expect(asRecord(file['settings'])).toEqual({ minGapMs: 0, maxOutputTokens: 800, timeoutMs: 60_000, order: 'plan' });
+      const chosen = plan(collected, { votes: 5, investigations: 2, triage: 2, runs: 2 });
+      expect(orderOf(file).filter((entry) => entry.model === 'claude-large').map((entry) => entry.calls)).toEqual([
+        [...chosen.votes.map((entry) => entry.id), ...chosen.investigations.map((entry) => entry.id)],
+        [...chosen.votes.map((entry) => entry.id), ...chosen.investigations.map((entry) => entry.id)],
+      ]);
+    });
+
+    it('takes seeds from 0 to 4294967295, and refuses a seed with --in-order, a seed that is not a number and one that is too large', async () => {
+      expect(orderLine((await run(['--seed', '0'], BOTH)).lines)).toContain('(seed 0; --seed 0 repeats it)');
+      expect(orderLine((await run(['--seed', '4294967295'], BOTH)).lines)).toContain('(seed 4294967295;');
+      await expect(run(['--seed', '4294967296'], BOTH)).rejects.toThrow('--seed is at most 4294967295');
+      await expect(run(['--in-order', '--seed', '3'], BOTH)).rejects.toThrow('--in-order and --seed do not go together');
+      for (const bad of ['-1', '1.5', 'many', '']) await expect(run(['--seed', bad], BOTH), bad).rejects.toThrow('--seed needs a whole number, 0 or more');
+      await expect(run(['--seed'], BOTH)).rejects.toThrow('--seed needs a whole number, 0 or more');
+    });
+
+    it('sends the same calls whatever the order, and puts neither a key nor what a model wrote in the order', async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guard-dogs-profile-'));
+      dirs.push(dir);
+      const shuffledRun = await run([...base, '--seed', '9', '--json', path.join(dir, 's.json')], BOTH);
+      const plainRun = await run([...base, '--in-order'], BOTH);
+      // claude-large: 5 votes and 2 investigations; claude-small: 2 triage requests; 2 runs of each.
+      expect(shuffledRun.fake.urls).toHaveLength(2 * (5 + 2) + 2 * 2);
+      expect(plainRun.fake.urls).toHaveLength(shuffledRun.fake.urls.length);
+      expect(fs.readFileSync(path.join(dir, 's.json'), 'utf8')).not.toContain(KEY);
+    });
   });
 
   it('counts the copies in the pacing line', async () => {
@@ -2818,7 +2999,7 @@ describe('npm run profile', () => {
     expect(asRecord(without['limits'])['controls']).toBeUndefined();
 
     const on = path.join(dir, 'on.json');
-    await run(['--run', '--votes', '2', '--investigations', '0', '--triage', '0', '--runs', '1', '--only', 'anthropic', '--controls', '--json', on], BOTH);
+    await run(['--run', '--votes', '2', '--investigations', '0', '--triage', '0', '--runs', '1', '--only', 'anthropic', '--controls', '--in-order', '--json', on], BOTH);
     const written = JSON.parse(fs.readFileSync(on, 'utf8')) as Record<string, unknown>;
     expect(asRecord(written['limits'])['controls']).toBe(true);
     expect(written['calls']).toBe(2 + 6);
@@ -2855,7 +3036,7 @@ describe('npm run profile', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guard-dogs-profile-'));
     dirs.push(dir);
     const file = path.join(dir, 'marked.json');
-    const sent = await run(['--run', '--votes', '0', '--investigations', '0', '--triage', '0', '--runs', '1', '--only', 'anthropic', '--controls', '--marked', 'tag,note', '--json', file], BOTH);
+    const sent = await run(['--run', '--votes', '0', '--investigations', '0', '--triage', '0', '--runs', '1', '--only', 'anthropic', '--controls', '--marked', 'tag,note', '--in-order', '--json', file], BOTH);
     expect(sent.code).toBe(0);
     expect(sent.fake.urls).toHaveLength(18);
     const text = sent.lines.join('\n');
@@ -2915,7 +3096,7 @@ describe('npm run profile', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guard-dogs-profile-'));
     dirs.push(dir);
     const file = path.join(dir, 'twin.json');
-    const sent = await run(['--run', '--votes', '0', '--investigations', '0', '--triage', '0', '--runs', '1', '--only', 'anthropic', '--twin', '--marked', 'tag,note', '--json', file], BOTH);
+    const sent = await run(['--run', '--votes', '0', '--investigations', '0', '--triage', '0', '--runs', '1', '--only', 'anthropic', '--twin', '--marked', 'tag,note', '--in-order', '--json', file], BOTH);
     expect(sent.code).toBe(0);
     expect(sent.fake.urls).toHaveLength(18);
     const text = sent.lines.join('\n');
@@ -2977,7 +3158,7 @@ describe('npm run profile', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guard-dogs-profile-'));
     dirs.push(dir);
     const file = path.join(dir, 'look.json');
-    const sent = await run(['--run', ...args, '--runs', '1', '--only', 'anthropic', '--investigate-twin', '--marked', 'tag,note', '--json', file], BOTH);
+    const sent = await run(['--run', ...args, '--runs', '1', '--only', 'anthropic', '--investigate-twin', '--marked', 'tag,note', '--in-order', '--json', file], BOTH);
     // The fake provider quarantines the first thing it is offered, and the report says so.
     expect(sent.fake.urls).toHaveLength(6);
     const text = sent.lines.join('\n');
