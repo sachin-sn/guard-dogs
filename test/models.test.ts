@@ -341,6 +341,90 @@ describe('analyzePanel', () => {
     expect(analysis.warnings.some((w) => w.startsWith('dog-1 sees a view'))).toBe(true);
   });
 
+  describe('what the dogs read', () => {
+    const seated = (...seats: [string, string][]): PanelMember[] => seats.map(([model, evidenceView], i) => ({ id: `dog-${i + 1}`, model, evidenceView }));
+    const SHARED = 'Every dog reads the "raw" view, so a line or a field that fools a reader of it fools all of them. Give some dogs a different view.';
+    const ALONE =
+      'The dogs that read the "raw" view, which shows a value an attacker can write, could approve on their own: they hold a majority and use more than one model. ' +
+      'A target taken from such a value is held only when the sidecar says the client wrote it; turn on requireTargetProvenance once every sidecar tags its events.';
+    const five = seated(['a-1', 'raw'], ['b-1', 'raw'], ['c-1', 'raw'], ['a-1', 'sum'], ['b-1', 'sum']);
+
+    it('has nothing to say when every dog reads a view of its own', () => {
+      const analysis = analyzePanel(registry, policyOf(seated(['a-1', 'raw'], ['b-1', 'sum'], ['c-1', 'time'])));
+      expect(analysis).toMatchObject({ sharedView: null, viewsThatCanApproveAlone: [], attackerViewsThatCanApproveAlone: [], warnings: [] });
+    });
+
+    it('warns when every dog reads the same view, and only then', () => {
+      const all = analyzePanel(registry, policyOf(seated(['a-1', 'raw'], ['b-1', 'raw'], ['c-1', 'raw'])));
+      expect(all.sharedView).toBe('raw');
+      expect(all.viewsThatCanApproveAlone).toEqual(['raw']);
+      expect(all.warnings).toEqual([SHARED]);
+      const pair = analyzePanel(registry, policyOf(seated(['a-1', 'raw'], ['b-1', 'raw'])));
+      expect(pair.sharedView).toBe('raw');
+      expect(pair.warnings).toContain(SHARED);
+      const almost = analyzePanel(registry, policyOf(seated(['a-1', 'raw'], ['b-1', 'raw'], ['c-1', 'sum'])));
+      expect(almost.sharedView).toBeNull();
+      expect(almost.warnings).toEqual([]);
+    });
+
+    it('finds the views whose dogs could approve alone, by the gate\'s own rules', () => {
+      expect(analyzePanel(registry, policyOf(five)).viewsThatCanApproveAlone).toEqual(['raw']);
+      // Two of five is no majority, whichever view they read.
+      const spread = seated(['a-1', 'raw'], ['b-1', 'raw'], ['c-1', 'sum'], ['a-1', 'sum'], ['b-1', 'time']);
+      expect(analyzePanel(registry, policyOf(spread)).viewsThatCanApproveAlone).toEqual([]);
+      // A majority on one model does not pass the gate, unless the model rule is off.
+      const oneModel = seated(['a-1', 'raw'], ['a-1', 'raw'], ['b-1', 'sum']);
+      expect(analyzePanel(registry, policyOf(oneModel)).viewsThatCanApproveAlone).toEqual([]);
+      expect(analyzePanel(registry, policyOf(oneModel, { requireDistinctModels: false })).viewsThatCanApproveAlone).toEqual(['raw']);
+      // Under a unanimous rule no part of the panel approves alone.
+      expect(analyzePanel(registry, policyOf(five, { rule: 'unanimous' })).viewsThatCanApproveAlone).toEqual([]);
+    });
+
+    it('warns about a view that shows an attacker-written value only when it is told which views do', () => {
+      const untold = analyzePanel(registry, policyOf(five));
+      expect(untold.attackerViewsThatCanApproveAlone).toEqual([]);
+      expect(untold.warnings).toEqual([]);
+      const told = analyzePanel(registry, policyOf(five), { viewsThatShowAttackerFields: ['raw'] });
+      expect(told.attackerViewsThatCanApproveAlone).toEqual(['raw']);
+      expect(told.warnings).toEqual([ALONE]);
+      // The view that cannot approve alone is not warned about, named or not.
+      const other = analyzePanel(registry, policyOf(five), { viewsThatShowAttackerFields: ['sum'] });
+      expect(other.attackerViewsThatCanApproveAlone).toEqual([]);
+      expect(other.warnings).toEqual([]);
+      const both = analyzePanel(registry, policyOf(five), { viewsThatShowAttackerFields: ['sum', 'raw'] });
+      expect(both.attackerViewsThatCanApproveAlone).toEqual(['raw']);
+    });
+
+    it('does not warn about such a view when the gate holds targets it cannot place, and still reports it', () => {
+      const analysis = analyzePanel(registry, policyOf(five, { requireTargetProvenance: true }), { viewsThatShowAttackerFields: ['raw'] });
+      expect(analysis.attackerViewsThatCanApproveAlone).toEqual(['raw']);
+      expect(analysis.warnings).toEqual([]);
+      // The shared view is a warning either way: provenance says nothing about a line written to fool a reader.
+      const all = seated(['a-1', 'raw'], ['b-1', 'raw'], ['c-1', 'raw']);
+      expect(analyzePanel(registry, policyOf(all, { requireTargetProvenance: true }), { viewsThatShowAttackerFields: ['raw'] }).warnings).toEqual([SHARED]);
+      expect(analyzePanel(registry, policyOf(all), { viewsThatShowAttackerFields: ['raw'] }).warnings).toEqual([SHARED, ALONE]);
+    });
+
+    it('lists views in order, and puts these warnings after the others', () => {
+      const members = seated(['a-1', 'zed'], ['a-2', 'zed'], ['b-1', 'zed'], ['c-1', 'zed']);
+      const analysis = analyzePanel(registry, policyOf(members));
+      expect(analysis.warnings.at(-1)).toBe(SHARED.replace('"raw"', '"zed"'));
+      expect(analysis.warnings.length).toBeGreaterThan(1);
+      const two = seated(['a-1', 'b-view'], ['b-1', 'b-view'], ['a-1', 'a-view'], ['b-1', 'a-view']);
+      expect(analyzePanel(registry, policyOf(two, { rule: 'majority' })).viewsThatCanApproveAlone).toEqual([]);
+      const none = seated(['a-1', 'b-view'], ['b-1', 'b-view'], ['c-1', 'a-view']);
+      expect(analyzePanel(registry, policyOf(none)).viewsThatCanApproveAlone).toEqual(['b-view']);
+    });
+
+    it('refuses a view that no dog reads, and a list that is not one', () => {
+      const policy = policyOf(five);
+      expect(() => analyzePanel(registry, policy, { viewsThatShowAttackerFields: ['logs'] })).toThrow('viewsThatShowAttackerFields must name views that some dog reads (these are read: raw, sum)');
+      expect(() => analyzePanel(registry, policy, { viewsThatShowAttackerFields: ['raw', 7 as never] })).toThrow(/must name views/);
+      expect(() => analyzePanel(registry, policy, { viewsThatShowAttackerFields: 'raw' as never })).toThrow(/must name views/);
+      expect(analyzePanel(registry, policy, { viewsThatShowAttackerFields: [] }).warnings).toEqual([]);
+    });
+  });
+
   it('refuses a panel that uses a model outside the registry', () => {
     expect(() => analyzePanel(registry, policyOf(panel('a-1', 'rogue-model')))).toThrow(/"dog-2" uses model "rogue-model"/);
   });

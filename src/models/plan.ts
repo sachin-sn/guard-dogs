@@ -112,6 +112,12 @@ export interface PanelAnalysis {
   correlatedModels: string[][];
   /** Dogs whose model does not meet the data handling required for their view. */
   handlingViolations: string[];
+  /** The view that every dog reads, when they all read the same one; otherwise null. */
+  sharedView: string | null;
+  /** Views whose dogs could approve without anyone else: they hold a majority and meet the gate's model rules. */
+  viewsThatCanApproveAlone: string[];
+  /** Those among them that show a value an attacker can write (`AnalyzeOptions.viewsThatShowAttackerFields`). */
+  attackerViewsThatCanApproveAlone: string[];
   /** The above in words, for a person setting up the panel. */
   warnings: string[];
 }
@@ -119,6 +125,14 @@ export interface PanelAnalysis {
 export interface AnalyzeOptions {
   /** The same limits `planPanel` takes, to check a panel that was built by hand. */
   requiredHandling?: Readonly<Record<string, ModelHandling>>;
+  /**
+   * The views that show a value an attacker can write: an address the client
+   * forwarded, a header, a path, free text. A view's name does not say, so the
+   * deployer does: a view of the raw log does, a view of counts does not. Each
+   * must be a view some dog reads. Default: none, and the warning about dogs
+   * that read such a view is not made.
+   */
+  viewsThatShowAttackerFields?: readonly string[];
 }
 
 /**
@@ -168,6 +182,17 @@ export function analyzePanel(registry: ModelRegistry, policy: GatePolicy, option
     if (needed !== undefined && !handlingOk(specs.get(member.id) as RegisteredModel, needed)) handlingViolations.push(member.id);
   }
 
+  // What the dogs read: one view for all of them takes away the point of giving them different ones.
+  const viewOf = (id: string): string => (policy.panel.get(id) as PanelMember).evidenceView;
+  const views = [...new Set(ids.map(viewOf))].sort();
+  const sharedView = views.length === 1 ? (views[0] as string) : null;
+  const viewsThatCanApproveAlone = views.filter((view) => wouldApprove(new Set(ids.filter((id) => viewOf(id) === view))));
+  const attackerViews = options.viewsThatShowAttackerFields ?? [];
+  if (!Array.isArray(attackerViews) || attackerViews.some((view) => typeof view !== 'string' || !views.includes(view))) {
+    throw new RangeError(`viewsThatShowAttackerFields must name views that some dog reads (these are read: ${views.join(', ')})`);
+  }
+  const attackerViewsThatCanApproveAlone = viewsThatCanApproveAlone.filter((view) => attackerViews.includes(view));
+
   const warnings: string[] = [];
   for (const provider of providersThatBlockApproval) {
     warnings.push(`If ${provider} is unavailable, the other dogs cannot reach a majority, so nothing is approved until a human acts.`);
@@ -182,5 +207,29 @@ export function analyzePanel(registry: ModelRegistry, policy: GatePolicy, option
     warnings.push(`${id} sees a view that needs stronger data handling than its model provides.`);
   }
 
-  return { size: ids.length, seatsByProvider, providersThatBlockApproval, providersThatCanApproveAlone, correlatedModels, handlingViolations, warnings };
+  if (sharedView !== null) {
+    warnings.push(`Every dog reads the "${sharedView}" view, so a line or a field that fools a reader of it fools all of them. Give some dogs a different view.`);
+  }
+  // With `requireTargetProvenance` the gate holds a target whose source it cannot place, so the views are not all that stands in the way.
+  if (!policy.requireTargetProvenance) {
+    for (const view of attackerViewsThatCanApproveAlone) {
+      warnings.push(
+        `The dogs that read the "${view}" view, which shows a value an attacker can write, could approve on their own: they hold a majority and use more than one model. ` +
+          'A target taken from such a value is held only when the sidecar says the client wrote it; turn on requireTargetProvenance once every sidecar tags its events.',
+      );
+    }
+  }
+
+  return {
+    size: ids.length,
+    seatsByProvider,
+    providersThatBlockApproval,
+    providersThatCanApproveAlone,
+    correlatedModels,
+    handlingViolations,
+    sharedView,
+    viewsThatCanApproveAlone,
+    attackerViewsThatCanApproveAlone,
+    warnings,
+  };
 }
