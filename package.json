@@ -39,7 +39,7 @@
     "@types/node": "^26.6.5",
     "@types/semver": "^7.5.8",
     "typescript": "^7.0.2",
-    "vite": "^8.3.5",
+    "vite": "^8.3.7",
     "vitest": "^5.0.5"
   }
 }
