@@ -710,6 +710,59 @@ interface Who {
   run: number;
   /** For a call that failed: the kind of failure, never what the provider said. */
   failure?: string;
+  /** For an `output` failure where the model finished and wrote text the reply could not be read from: why, and the shape of the text, never the text. */
+  unreadable?: Unreadable;
+}
+
+/**
+ * Why a finished reply could not be read, without what it said: the library's
+ * own reason (fixed text, written in this repository) and the shape of the
+ * reply. Enough to tell prose around a valid object from a broken object.
+ */
+export interface Unreadable {
+  /** The parser's reason, such as "the reply was not a JSON object". */
+  reason: string;
+  /** The length of the reply, in characters. */
+  chars: number;
+  /** Whether the reply is in a code fence. */
+  fenced: boolean;
+  /** Whether there is text before the first `{`, or after the last `}`, besides a fence and spaces. */
+  textBefore: boolean;
+  textAfter: boolean;
+  /** What lies from the first `{` to the last `}`: a JSON object, something that does not parse, or nothing at all. */
+  inner: 'object' | 'broken' | 'none';
+}
+
+/** The shape of a reply, as `Unreadable` describes it. */
+export function shapeOf(reply: string): Omit<Unreadable, 'reason'> {
+  let text = reply.trim();
+  const fence = /^```[A-Za-z]*[ \t]*\r?\n([\s\S]*?)\r?\n?```$/.exec(text);
+  if (fence !== null) text = (fence[1] as string).trim();
+  const open = text.indexOf('{');
+  const close = text.lastIndexOf('}');
+  let inner: Unreadable['inner'] = 'none';
+  if (open !== -1 && close > open) {
+    try {
+      // A slice from a brace to a brace that parses is an object.
+      JSON.parse(text.slice(open, close + 1));
+      inner = 'object';
+    } catch {
+      inner = 'broken';
+    }
+  }
+  return {
+    chars: reply.length,
+    fenced: fence !== null,
+    textBefore: open === -1 ? text.length > 0 : text.slice(0, open).trim().length > 0,
+    textAfter: close === -1 ? false : text.slice(close + 1).trim().length > 0,
+    inner,
+  };
+}
+
+/** The `unreadable` part of a failed record, when the failure is a finished reply that could not be read. */
+export function unreadableOf(error: unknown, reply: string | undefined): { unreadable?: Unreadable } {
+  if (!(error instanceof ModelError) || error.kind !== 'output' || error.detail !== undefined || reply === undefined) return {};
+  return { unreadable: { reason: sanitizeEvidence(error.message, 120), ...shapeOf(reply) } };
 }
 
 export interface VoteRecord extends Who {
@@ -865,6 +918,18 @@ export async function measure(participants: readonly Participant[], chosen: Plan
   await Promise.all(
     participants.map(async (participant, index) => {
       const who = (run: number): Who => ({ model: participant.name, family: participant.family, run });
+      // The last reply this model gave, kept only long enough to describe its shape when it cannot be read.
+      let last: string | undefined;
+      const client: ModelClient = {
+        model: participant.client.model,
+        async complete(request, signal) {
+          last = undefined;
+          const reply = await participant.client.complete(request, signal);
+          last = reply;
+          return reply;
+        },
+      };
+      const unreadable = (error: unknown): { unreadable?: Unreadable } => unreadableOf(error, last);
       let earliest = 0;
       const pace = async (): Promise<void> => {
         if (gapMs === 0) return;
@@ -879,12 +944,12 @@ export async function measure(participants: readonly Participant[], chosen: Plan
             steps.push({
               id: entry.id,
               ask: async () => {
-                const dog = profileDog(entry.view, participant.client);
+                const dog = profileDog(entry.view, client);
                 try {
                   const opinion = await dog.review(structuredClone(entry.task), AbortSignal.timeout(timeoutMs));
                   result.votes.push({ ...who(run), caseId: entry.id, label: entry.label, outcome: opinion.decision });
                 } catch (error) {
-                  result.votes.push({ ...who(run), caseId: entry.id, label: entry.label, outcome: 'failed', failure: why(error) });
+                  result.votes.push({ ...who(run), caseId: entry.id, label: entry.label, outcome: 'failed', failure: why(error), ...unreadable(error) });
                 }
               },
             });
@@ -893,13 +958,13 @@ export async function measure(participants: readonly Participant[], chosen: Plan
             steps.push({
               id: entry.id,
               ask: async () => {
-                const dog = profileDog(entry.view, participant.client);
+                const dog = profileDog(entry.view, client);
                 const seen = { caseId: entry.id, variantOf: entry.variantOf as string, view: entry.view, label: entry.label };
                 try {
                   const opinion = await dog.review(structuredClone(entry.task), AbortSignal.timeout(timeoutMs));
                   result.views.push({ ...who(run), ...seen, outcome: opinion.decision });
                 } catch (error) {
-                  result.views.push({ ...who(run), ...seen, outcome: 'failed', failure: why(error) });
+                  result.views.push({ ...who(run), ...seen, outcome: 'failed', failure: why(error), ...unreadable(error) });
                 }
               },
             });
@@ -908,13 +973,13 @@ export async function measure(participants: readonly Participant[], chosen: Plan
             steps.push({
               id: entry.id,
               ask: async () => {
-                const dog = profileDog(entry.view, participant.client, entry.marking);
+                const dog = profileDog(entry.view, client, entry.marking);
                 const seen = { caseId: entry.id, planted: entry.planted, reason: entry.reason, view: entry.view, marking: entry.marking, label: entry.label };
                 try {
                   const opinion = await dog.review(structuredClone(entry.task), AbortSignal.timeout(timeoutMs));
                   result.controls.push({ ...who(run), ...seen, outcome: opinion.decision });
                 } catch (error) {
-                  result.controls.push({ ...who(run), ...seen, outcome: 'failed', failure: why(error) });
+                  result.controls.push({ ...who(run), ...seen, outcome: 'failed', failure: why(error), ...unreadable(error) });
                 }
               },
             });
@@ -923,13 +988,13 @@ export async function measure(participants: readonly Participant[], chosen: Plan
             steps.push({
               id: entry.id,
               ask: async () => {
-                const dog = profileDog(entry.view, participant.client, entry.marking);
+                const dog = profileDog(entry.view, client, entry.marking);
                 const seen = { caseId: entry.id, cell: entry.cell, reason: entry.reason, view: entry.view, marking: entry.marking, label: entry.label };
                 try {
                   const opinion = await dog.review(structuredClone(entry.task), AbortSignal.timeout(timeoutMs));
                   result.twins.push({ ...who(run), ...seen, outcome: opinion.decision });
                 } catch (error) {
-                  result.twins.push({ ...who(run), ...seen, outcome: 'failed', failure: why(error) });
+                  result.twins.push({ ...who(run), ...seen, outcome: 'failed', failure: why(error), ...unreadable(error) });
                 }
               },
             });
@@ -940,10 +1005,10 @@ export async function measure(participants: readonly Participant[], chosen: Plan
               ask: async () => {
                 const seen = { caseId: entry.id, scenario: entry.scenario, marking: entry.marking };
                 try {
-                  const reply = await participant.client.complete(entry.request, AbortSignal.timeout(timeoutMs));
+                  const reply = await client.complete(entry.request, AbortSignal.timeout(timeoutMs));
                   result.twinInvestigations.push({ ...who(run), ...seen, outcome: classify(reply, entry) });
                 } catch (error) {
-                  result.twinInvestigations.push({ ...who(run), ...seen, outcome: 'failed', failure: why(error) });
+                  result.twinInvestigations.push({ ...who(run), ...seen, outcome: 'failed', failure: why(error), ...unreadable(error) });
                 }
               },
             });
@@ -953,10 +1018,10 @@ export async function measure(participants: readonly Participant[], chosen: Plan
               id: entry.id,
               ask: async () => {
                 try {
-                  const reply = await participant.client.complete(entry.request, AbortSignal.timeout(timeoutMs));
+                  const reply = await client.complete(entry.request, AbortSignal.timeout(timeoutMs));
                   result.investigations.push({ ...who(run), caseId: entry.id, category: entry.category, outcome: classify(reply, entry) });
                 } catch (error) {
-                  result.investigations.push({ ...who(run), caseId: entry.id, category: entry.category, outcome: 'failed', failure: why(error) });
+                  result.investigations.push({ ...who(run), caseId: entry.id, category: entry.category, outcome: 'failed', failure: why(error), ...unreadable(error) });
                 }
               },
             });
@@ -968,14 +1033,14 @@ export async function measure(participants: readonly Participant[], chosen: Plan
               ask: async () => {
                 const ids = Object.keys(entry.expected);
                 try {
-                  const reply = await participant.client.complete(entry.request, AbortSignal.timeout(timeoutMs));
+                  const reply = await client.complete(entry.request, AbortSignal.timeout(timeoutMs));
                   const answers = parseTriageReply(reply, new Set(ids));
                   for (const itemId of ids) {
                     result.triage.push({ ...who(run), caseId: entry.id, itemId, expected: entry.expected[itemId] as 'escalate' | 'routine', outcome: answers.get(itemId)?.decision ?? 'missing' });
                   }
                 } catch (error) {
                   for (const itemId of ids) {
-                    result.triage.push({ ...who(run), caseId: entry.id, itemId, expected: entry.expected[itemId] as 'escalate' | 'routine', outcome: 'failed', failure: why(error) });
+                    result.triage.push({ ...who(run), caseId: entry.id, itemId, expected: entry.expected[itemId] as 'escalate' | 'routine', outcome: 'failed', failure: why(error), ...unreadable(error) });
                   }
                 }
               },
@@ -1220,6 +1285,45 @@ export function callHealth(measured: Measured, model: string): CallHealth {
 /** A failure that is the model running out of the output limit, by the finish reason each provider uses for it. */
 const cutOff = (failure: string): boolean => /^output finish (MAX_TOKENS|max_tokens|length)$/.test(failure);
 
+/** In words, the shape of an unreadable reply: what was around the object, and whether the object itself parsed. */
+export function describeShape(shape: Omit<Unreadable, 'reason'>): string {
+  const around = [shape.textBefore ? 'text before' : '', shape.textAfter ? 'text after' : ''].filter((part) => part.length > 0).join(' and ');
+  const inner = shape.inner === 'object' ? 'a JSON object' : shape.inner === 'broken' ? 'braces that do not parse' : 'no braces';
+  return `${inner}${around.length > 0 ? `, with ${around}` : ''}${shape.fenced ? ', in a code fence' : ''}`;
+}
+
+/**
+ * For each model, why its finished replies could not be read: one line for each
+ * reason and shape, with a count and the lengths. Nothing a model wrote is shown.
+ */
+function renderUnreadable(measured: Measured, participants: readonly Participant[]): string[] {
+  type Seen = { model: string; unreadable: Unreadable };
+  const records: Seen[] = [];
+  for (const record of [measured.votes, measured.views, measured.controls, measured.twins, measured.twinInvestigations, measured.investigations].flat() as Who[]) {
+    if (record.unreadable !== undefined) records.push({ model: record.model, unreadable: record.unreadable });
+  }
+  // A triage request leaves one record per item; count each call once.
+  const triage = new Map<string, Seen>();
+  for (const record of measured.triage) if (record.unreadable !== undefined) triage.set(`${record.model}|${record.run}|${record.caseId}`, { model: record.model, unreadable: record.unreadable });
+  const all = [...records, ...triage.values()];
+  if (all.length === 0) return [];
+  const lines = ['  why the replies could not be read (the parser\'s reason, and the shape of the reply; nothing it said):'];
+  for (const participant of participants) {
+    const groups = new Map<string, number[]>();
+    for (const record of all.filter((each) => each.model === participant.name)) {
+      const key = `${record.unreadable.reason}: ${describeShape(record.unreadable)}`;
+      groups.set(key, [...(groups.get(key) ?? []), record.unreadable.chars]);
+    }
+    for (const [key, chars] of [...groups].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))) {
+      lines.push(`    ${participant.name.padEnd(14)} ${key} x${chars.length} (${Math.min(...chars)} to ${Math.max(...chars)} characters)`);
+    }
+  }
+  if (all.some((record) => record.unreadable.inner === 'object' && (record.unreadable.textBefore || record.unreadable.textAfter))) {
+    lines.push('    a JSON object with text around it: the model answered, and explained as well. The parser does not search prose for an object, on purpose: a log line quoted in the explanation could become a vote.');
+  }
+  return lines;
+}
+
 function renderFailures(measured: Measured, participants: readonly Participant[]): string[] {
   const health = participants.map((participant) => ({ participant, health: callHealth(measured, participant.name) })).filter((entry) => entry.health.failed > 0);
   if (health.length === 0) return [];
@@ -1248,6 +1352,7 @@ function renderFailures(measured: Measured, participants: readonly Participant[]
   }
   if (seen.has('output no text')) lines.push('  output no text: the model finished without writing an answer.');
   if (seen.has('output')) lines.push('  output: the model finished, but what it wrote was not the one JSON object that was asked for. A larger output limit will not help.');
+  lines.push(...renderUnreadable(measured, participants));
   if (seen.has('refused')) lines.push('  refused: the provider declined or blocked the request. That is about using that provider on this text, not about speed.');
   return lines;
 }
