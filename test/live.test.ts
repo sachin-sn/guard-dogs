@@ -743,6 +743,10 @@ describe('why a reply could not be read', () => {
     let m = 0;
     const stale = await measure([participant('claude-large', () => { if (m++ === 0) return 'nope'; throw new ModelError('network', 'the connection failed'); })], plan(collected, { votes: 2, investigations: 0, triage: 0, runs: 1 }));
     expect(stale.votes.map((record) => [record.failure, record.unreadable === undefined])).toEqual([['output', false], ['network', true]]);
+    // Nor is a call whose client failed before it gave any text, whatever kind of failure that is.
+    let k = 0;
+    const thrown = await measure([participant('claude-large', () => { if (k++ === 0) return 'nope'; throw new ModelError('output', 'the client gave up'); })], plan(collected, { votes: 2, investigations: 0, triage: 0, runs: 1 }));
+    expect(thrown.votes.map((record) => record.unreadable === undefined)).toEqual([false, true]);
     // Only a finished reply the parser refused is described, whatever else went wrong after a reply arrived.
     expect(unreadableOf(new ModelError('output', 'the reply was not a JSON object'), 'x')).toEqual({ unreadable: { reason: 'the reply was not a JSON object', ...shapeOf('x') } });
     expect(unreadableOf(new ModelError('output', 'the model did not finish its answer', undefined, 'finish length'), 'x')).toEqual({});
