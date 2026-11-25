@@ -743,8 +743,9 @@ export function shapeOf(reply: string): Omit<Unreadable, 'reason'> {
   let inner: Unreadable['inner'] = 'none';
   if (open !== -1 && close > open) {
     try {
-      const value = JSON.parse(text.slice(open, close + 1)) as unknown;
-      inner = typeof value === 'object' && value !== null && !Array.isArray(value) ? 'object' : 'broken';
+      // A slice from a brace to a brace that parses is an object.
+      JSON.parse(text.slice(open, close + 1));
+      inner = 'object';
     } catch {
       inner = 'broken';
     }
@@ -759,7 +760,7 @@ export function shapeOf(reply: string): Omit<Unreadable, 'reason'> {
 }
 
 /** The `unreadable` part of a failed record, when the failure is a finished reply that could not be read. */
-function unreadableOf(error: unknown, reply: string | undefined): { unreadable?: Unreadable } {
+export function unreadableOf(error: unknown, reply: string | undefined): { unreadable?: Unreadable } {
   if (!(error instanceof ModelError) || error.kind !== 'output' || error.detail !== undefined || reply === undefined) return {};
   return { unreadable: { reason: sanitizeEvidence(error.message, 120), ...shapeOf(reply) } };
 }

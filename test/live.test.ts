@@ -12,6 +12,7 @@ import {
   inputsOf,
   makeups,
   describeShape,
+  unreadableOf,
   measure,
   shapeOf,
   mostlyFailed,
@@ -738,6 +739,16 @@ describe('why a reply could not be read', () => {
     const cut = await measure([participant('claude-large', () => { throw new ModelError('output', 'the model did not finish its answer', undefined, 'finish max_tokens'); })], one);
     expect(cut.votes[0]).toMatchObject({ failure: 'output finish max_tokens' });
     expect(cut.votes[0]?.unreadable).toBeUndefined();
+    // A call with no reply after one with a bad reply is not described by the bad one.
+    let m = 0;
+    const stale = await measure([participant('claude-large', () => { if (m++ === 0) return 'nope'; throw new ModelError('network', 'the connection failed'); })], plan(collected, { votes: 2, investigations: 0, triage: 0, runs: 1 }));
+    expect(stale.votes.map((record) => [record.failure, record.unreadable === undefined])).toEqual([['output', false], ['network', true]]);
+    // Only a finished reply the parser refused is described, whatever else went wrong after a reply arrived.
+    expect(unreadableOf(new ModelError('output', 'the reply was not a JSON object'), 'x')).toEqual({ unreadable: { reason: 'the reply was not a JSON object', ...shapeOf('x') } });
+    expect(unreadableOf(new ModelError('output', 'the model did not finish its answer', undefined, 'finish length'), 'x')).toEqual({});
+    expect(unreadableOf(new ModelError('response', 'unreadable'), 'x')).toEqual({});
+    expect(unreadableOf(new TypeError('boom'), 'x')).toEqual({});
+    expect(unreadableOf(new ModelError('output', 'the reply was not a JSON object'), undefined)).toEqual({});
     // A good answer after a bad one is not described by the bad one.
     let n = 0;
     const mixed = await measure([participant('claude-large', () => (n++ === 0 ? 'nope' : '{"decision":"abstain"}'))], plan(collected, { votes: 2, investigations: 0, triage: 0, runs: 1 }));
@@ -753,6 +764,10 @@ describe('why a reply could not be read', () => {
     expect(text).toContain('    claude-small   the reply was not a JSON object: no braces, with text before x1 (14 to 14 characters)');
     expect(text).toContain('a JSON object with text around it: the model answered, and explained as well.');
     expect(text).not.toContain('SECRET-WORDS');
+    // A triage request about two items leaves two records, and is one call.
+    const shape = { reason: 'the reply had no results list', ...shapeOf('{"a":1}') };
+    const two = { ...measured, votes: [], investigations: [], triage: ['i1', 'i2'].map((itemId) => ({ model: 'claude-small', family: 'claude', run: 1, caseId: 'tri-1', itemId, expected: 'escalate' as const, outcome: 'failed' as const, failure: 'output', unreadable: shape })) };
+    expect(renderMeasured(two, chosen, people).join('\n')).toContain('    claude-small   the reply had no results list: a JSON object x1 (7 to 7 characters)');
     const clean = await measure([participant('claude-large', () => 'no braces here')], plan(collected, { votes: 1, investigations: 0, triage: 0, runs: 1 }));
     expect(renderMeasured(clean, plan(collected, { votes: 1, investigations: 0, triage: 0, runs: 1 }), [participant('claude-large', () => '')]).join('\n')).not.toContain('a JSON object with text around it');
   });
