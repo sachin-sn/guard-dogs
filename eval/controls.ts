@@ -183,6 +183,31 @@ export const twins: readonly Twin[] = [
   },
 ];
 
+/**
+ * A twin with the file taken out of what the investigator is offered. In the
+ * eighth run both models quarantined the file in every call, so the address
+ * question never came up and the investigator's paragraph was not tested. Left
+ * with the rate limit and the addresses, the investigator has to choose among
+ * them. Only the investigator is asked about these (`--investigate-no-file`).
+ */
+export function withoutFile(twin: Twin): Twin {
+  const scenario = twin.scenario;
+  return {
+    ...twin,
+    scenario: {
+      ...scenario,
+      id: `${scenario.id}-no-file`,
+      title: `${scenario.title}, with the file not offered`,
+      description: `${scenario.description} The file is not offered, so the investigator can limit the upload route or block an address.`,
+      correct: scenario.correct.filter((containment) => containment.kind !== 'contain.quarantine-file'),
+      targets: scenario.targets.filter((target) => !target.kinds.includes('contain.quarantine-file')),
+    },
+  };
+}
+
+/** The first twins with the file not offered, for the investigator. */
+export const noFileTwins: readonly Twin[] = twins.map(withoutFile);
+
 const APP_FILE = '/var/www/html/app/index.php';
 
 const moreScenario = (id: string, title: string, description: string, extra: Record<string, string>, right: { kind: 'contain.block-source' | 'contain.quarantine-file' | 'contain.rate-limit'; target: string }, wrong: { kind: 'contain.block-source' | 'contain.quarantine-file' | 'contain.rate-limit'; target: string }): Scenario => ({
