@@ -49,6 +49,11 @@
  * offered as targets, and the report (TWIN LOOK) counts which of them it proposes
  * to block, whether it acts on the file instead, or whether it says nothing.
  *
+ * `--investigate-no-file` asks the investigator about the same uploads with the
+ * file not offered, so that it has to choose between the rate limit and the
+ * addresses (in the eighth run it quarantined the file every time). The rows are
+ * under TWIN LOOK, with the uploads named `...-no-file`.
+ *
  * `--more-twins` asks the voters about three further uploads, each with another
  * field the client writes (the name it gave the file, the Host header, the user
  * agent) and with a quarantine and a rate limit as well as a block: the
@@ -113,8 +118,8 @@ export async function main(
   if (markedAt !== -1 && (markedRaw === undefined || markedRaw.startsWith('--'))) throw new RangeError('--marked needs tag, note or tag,note');
   const arms = markedRaw === undefined ? [] : markedRaw.split(',');
   for (const arm of arms) if (arm !== 'tag' && arm !== 'note') throw new RangeError('--marked needs tag, note or tag,note');
-  if (arms.length > 0 && !args.includes('--controls') && !args.includes('--twin') && !args.includes('--investigate-twin') && !args.includes('--more-twins')) {
-    throw new RangeError('--marked needs --controls, --twin, --investigate-twin or --more-twins');
+  if (arms.length > 0 && !args.includes('--controls') && !args.includes('--twin') && !args.includes('--investigate-twin') && !args.includes('--more-twins') && !args.includes('--investigate-no-file')) {
+    throw new RangeError('--marked needs --controls, --twin, --investigate-twin, --investigate-no-file or --more-twins');
   }
 
   const limits: Limits = {
@@ -127,6 +132,7 @@ export async function main(
     ...(args.includes('--twin') ? { twin: true } : {}),
     ...(args.includes('--investigate-twin') ? { investigateTwin: true } : {}),
     ...(args.includes('--more-twins') ? { moreTwins: true } : {}),
+    ...(args.includes('--investigate-no-file') ? { investigateNoFile: true } : {}),
     ...(arms.length > 0 ? { marked: [...new Set(arms)] as ('tag' | 'note')[] } : {}),
   };
   if (limits.runs > MAX_RUNS) throw new RangeError(`--runs is at most ${MAX_RUNS}`);

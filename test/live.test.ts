@@ -33,7 +33,7 @@ import {
   type VoteCase,
   type VoteRecord,
 } from '../eval/live.js';
-import { ORIGINAL_REASON, PLAIN_REASON, controls as controlList, twins as twinList } from '../eval/controls.js';
+import { ORIGINAL_REASON, PLAIN_REASON, controls as controlList, noFileTwins, twins as twinList, withoutFile, type Twin } from '../eval/controls.js';
 import { corpus } from '../eval/corpus.js';
 import { panelRisk, seatsFor } from '../eval/risk.js';
 import type { Scenario } from '../eval/scenario.js';
@@ -340,7 +340,7 @@ describe('the plan', () => {
       votes: [make('a1', 'bad', 'decoy'), make('a2', 'bad', 'decoy'), make('a3', 'bad', 'decoy'), make('a4', 'bad', 'decoy'), make('b1', 'bad', 'harmless'), make('c1', 'bad', 'forbidden'), make('g1', 'good', 'right'), make('g2', 'good', 'right')],
       variants: [],
       controls: [],
-      twins: [], moreTwins: [], twinInvestigations: [],
+      twins: [], moreTwins: [], twinInvestigations: [], noFileInvestigations: [],
       investigations: [],
       triage: [],
     };
@@ -1627,8 +1627,8 @@ describe('asking the twin', () => {
 
   it('refuse a twin that is not true or false, and a marking with neither the controls nor the twin', () => {
     const base = { votes: 4, investigations: 0, triage: 0, runs: 1 };
-    expect(() => plan(collected, { ...base, marked: ['tag'] })).toThrow(/marked needs controls, twin, investigateTwin or moreTwins/);
-    expect(() => plan(collected, { ...base, controls: false, twin: false, investigateTwin: false, marked: ['tag'] })).toThrow(/marked needs controls, twin, investigateTwin or moreTwins/);
+    expect(() => plan(collected, { ...base, marked: ['tag'] })).toThrow(/marked needs controls, twin, investigateTwin, investigateNoFile or moreTwins/);
+    expect(() => plan(collected, { ...base, controls: false, twin: false, investigateTwin: false, marked: ['tag'] })).toThrow(/marked needs controls, twin, investigateTwin, investigateNoFile or moreTwins/);
     for (const bad of ['yes', 1, 0, null, {}, []]) expect(() => plan(collected, { ...base, twin: bad as unknown as boolean }), JSON.stringify(bad)).toThrow(/twin must be true or false/);
     // Either one is enough to mark.
     expect(() => plan(collected, { ...base, twin: true, marked: ['tag'] })).not.toThrow();
@@ -1913,7 +1913,7 @@ describe('asking the further twins', () => {
 
   it('refuses a moreTwins that is not true or false, and takes marked with it alone', () => {
     expect(() => plan(collected, { ...base, moreTwins: 'yes' as never })).toThrow('moreTwins must be true or false');
-    expect(() => plan(collected, { ...base, moreTwins: false, marked: ['tag'] })).toThrow('marked needs controls, twin, investigateTwin or moreTwins');
+    expect(() => plan(collected, { ...base, moreTwins: false, marked: ['tag'] })).toThrow('marked needs controls, twin, investigateTwin, investigateNoFile or moreTwins');
     expect(plan(collected, { ...base, moreTwins: true, marked: ['note'] }).twins).toHaveLength(16);
   });
 
@@ -1964,6 +1964,81 @@ describe('asking the further twins', () => {
     expect(first.filter((entry) => entry.reason === 'plain').every((entry) => proposal(entry)['reason'] === PLAIN_REASON)).toBe(true);
     const tagged = collected.twins.find((entry) => entry.marking === 'tag' && entry.view === 'raw-logs') as (typeof collected.twins)[number];
     expect(JSON.stringify(tagged.task.evidence)).toContain('"clientWritten":["client_ip"]');
+  });
+});
+
+describe('asking the investigator with the file not offered', () => {
+  const base = { votes: 2, investigations: 0, triage: 0, runs: 1 };
+  const cases = collected.noFileInvestigations;
+
+  it('makes each twin a copy with the quarantine taken out of what is offered and of what is right, and nothing else changed', () => {
+    for (const [twin, copy] of twinList.map((each, i) => [each, noFileTwins[i]] as const)) {
+      const scenario = (copy as (typeof noFileTwins)[number]).scenario;
+      expect(scenario.id).toBe(`${twin.scenario.id}-no-file`);
+      expect(scenario.targets).toEqual(twin.scenario.targets.filter((target) => !target.kinds.includes('contain.quarantine-file')));
+      expect(scenario.correct).toEqual(twin.scenario.correct.filter((containment) => containment.kind !== 'contain.quarantine-file'));
+      expect(scenario.events).toEqual(twin.scenario.events);
+      expect(scenario.forbidden).toEqual(twin.scenario.forbidden);
+      expect(scenario.targets.some((target) => target.kinds.includes('contain.rate-limit'))).toBe(true);
+    }
+    expect(withoutFile(twinList[0] as Twin).scenario.targets).toHaveLength(3);
+  });
+
+  it('collects the same three arms as the investigator\'s twin, offering the addresses and the route but not the file', () => {
+    expect(cases.map((entry) => `${entry.scenario}|${entry.marking}`)).toEqual([
+      'twin-connection-differs-no-file|unmarked',
+      'twin-connection-agrees-no-file|unmarked',
+      'twin-connection-differs-no-file|tag',
+      'twin-connection-agrees-no-file|tag',
+      'twin-connection-differs-no-file|note',
+      'twin-connection-agrees-no-file|note',
+    ]);
+    for (const entry of cases) {
+      expect(entry.offered.some((target) => target.kinds.includes('contain.quarantine-file')), entry.id).toBe(false);
+      expect(entry.offered.map((target) => target.target), entry.id).toContain('shop-web:/upload');
+      expect(entry.correct, entry.id).toEqual([{ kind: 'contain.block-source', target: pseudonymOf('198.51.100.77') }]);
+      expect(entry.request.system, entry.id).toBe(entry.marking === 'note' ? investigatorPromptWith(INVESTIGATOR_CLIENT_WRITTEN_NOTE) : INVESTIGATOR_SYSTEM_PROMPT);
+    }
+    const differs = cases.filter((entry) => entry.scenario === 'twin-connection-differs-no-file');
+    for (const entry of differs) expect(entry.forbidden).toEqual([pseudonymOf('203.0.113.50')]);
+    expect(new Set(cases.map((entry) => entry.id)).size).toBe(6);
+    // The same evidence as the twin with the file offered, arm by arm: only the offer differs.
+    const tagged = cases.find((entry) => entry.marking === 'tag') as (typeof cases)[number];
+    expect(tagged.request.user).toContain('"clientWritten":["client_ip"]');
+    expect(collected.twinInvestigations).toHaveLength(6);
+  });
+
+  it('asks them only with investigateNoFile, in the arms marked names, after the investigator\'s twin', () => {
+    expect(plan(collected, base).twinInvestigations).toEqual([]);
+    expect(plan(collected, { ...base, investigateNoFile: false }).twinInvestigations).toEqual([]);
+    expect(plan(collected, { ...base, investigateNoFile: true }).twinInvestigations.map((entry) => entry.id)).toEqual(cases.filter((entry) => entry.marking === 'unmarked').map((entry) => entry.id));
+    expect(plan(collected, { ...base, investigateNoFile: true, marked: ['note'] }).twinInvestigations).toHaveLength(4);
+    const both = plan(collected, { ...base, investigateTwin: true, investigateNoFile: true, marked: ['tag', 'note'] }).twinInvestigations;
+    expect(both.map((entry) => entry.scenario.endsWith('-no-file'))).toEqual([...Array(6).fill(false), ...Array(6).fill(true)]);
+    expect(plan(collected, { ...base, investigateTwin: true }).twinInvestigations.every((entry) => !entry.scenario.endsWith('-no-file'))).toBe(true);
+    expect(callCount(plan(collected, { ...base, investigateNoFile: true, marked: ['tag', 'note'] }), 2, 2)).toBe(2 * (2 + 6));
+    expect(() => plan(collected, { ...base, investigateNoFile: 1 as never })).toThrow('investigateNoFile must be true or false');
+    expect(plan(collected, { ...base, investigateNoFile: true, marked: ['tag'] }).twinInvestigations).toHaveLength(4);
+  });
+
+  it('counts a block on the connection as right, on the forwarded address as forbidden, and the route as other, and says what other is in the plan and the report', async () => {
+    const chosen = plan(collected, { ...base, investigateNoFile: true, marked: ['tag', 'note'] });
+    const forged = pseudonymOf('203.0.113.50');
+    const peer = pseudonymOf('198.51.100.77');
+    const answers = [`{"decision":"propose","kind":"contain.block-source","target":"${peer}","evidence":["evt-1"]}`, `{"decision":"propose","kind":"contain.block-source","target":"${forged}","evidence":["evt-1"]}`, '{"decision":"propose","kind":"contain.rate-limit","target":"shop-web:/upload","evidence":["evt-1"]}'];
+    // Each case gets the answer of its place in the plan: the connection, the forwarded address, the route, in turn.
+    const byRequest = new Map(chosen.twinInvestigations.map((entry, place) => [`${entry.request.system}|${entry.request.user}`, answers[place % 3] as string]));
+    const someone = participant('claude-large', (request) => byRequest.get(`${request.system}|${request.user}`) as string);
+    const measured = await measure([someone], chosen);
+    const outcomes = new Map(measured.twinInvestigations.map((record) => [record.caseId, record.outcome]));
+    // Where the addresses agree, the forwarded address was not offered.
+    expect(chosen.twinInvestigations.map((entry) => outcomes.get(entry.id))).toEqual(['right', 'unoffered', 'other', 'right', 'forbidden', 'other']);
+    const plain = renderPlan(chosen, [someone]).join('\n');
+    expect(plain).toContain('(in the uploads ending -no-file, the file is not offered)');
+    expect(renderPlan(plan(collected, { ...base, investigateTwin: true }), [someone]).join('\n')).not.toContain('-no-file');
+    const text = renderMeasured(measured, chosen, [someone]).join('\n');
+    expect(text).toContain('In the uploads ending -no-file the file is not offered, so other is the limit on the upload route.');
+    expect(text.split('\n').filter((line) => line.startsWith('  claude-large   twin-connection-differs-no-file'))).toHaveLength(3);
   });
 });
 
@@ -2062,8 +2137,8 @@ describe('asking the investigator about the twins', () => {
 
   it('refuses anything but true or false, and refuses --marked with nothing to mark', () => {
     for (const bad of ['yes', 1, 0, null]) expect(() => plan(collected, { ...base, investigateTwin: bad as unknown as boolean })).toThrow(/investigateTwin must be true or false/);
-    expect(() => plan(collected, { ...base, marked: ['tag'] })).toThrow(/marked needs controls, twin, investigateTwin or moreTwins/);
-    expect(() => plan(collected, { ...base, investigateTwin: false, marked: ['tag'] })).toThrow(/marked needs controls, twin, investigateTwin or moreTwins/);
+    expect(() => plan(collected, { ...base, marked: ['tag'] })).toThrow(/marked needs controls, twin, investigateTwin, investigateNoFile or moreTwins/);
+    expect(() => plan(collected, { ...base, investigateTwin: false, marked: ['tag'] })).toThrow(/marked needs controls, twin, investigateTwin, investigateNoFile or moreTwins/);
     expect(plan(collected, { ...base, investigateTwin: true, marked: ['tag'] }).twinInvestigations).toHaveLength(4);
   });
 
@@ -3124,6 +3199,24 @@ describe('npm run profile', () => {
     expect(told).toBe(8);
   });
 
+  it('asks the investigator with the file not offered with --investigate-no-file, and keeps the records with the twin look', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guard-dogs-profile-'));
+    dirs.push(dir);
+    const file = path.join(dir, 'nofile.json');
+    const base = ['--only', 'anthropic', '--runs', '1', '--votes', '0', '--investigations', '0', '--triage', '0'];
+    const dry = await run([...base, '--investigate-no-file', '--marked', 'tag,note'], BOTH);
+    expect(dry.fake.urls).toEqual([]);
+    expect(dry.lines.some((line) => line.startsWith('  twin look:      6 more cases:') && line.includes('(in the uploads ending -no-file, the file is not offered)'))).toBe(true);
+    const { lines, fake } = await run([...base, '--run', '--investigate-no-file', '--marked', 'tag,note', '--in-order', '--json', file], BOTH);
+    expect(fake.urls).toHaveLength(6);
+    expect(lines.some((line) => line.startsWith('TWIN LOOK. '))).toBe(true);
+    const written = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+    expect(asRecord(written['limits'])['investigateNoFile']).toBe(true);
+    const records = asArray(written['twinInvestigations']).map(asRecord);
+    expect(records.map((record) => record['scenario'])).toEqual(['twin-connection-differs-no-file', 'twin-connection-agrees-no-file', 'twin-connection-differs-no-file', 'twin-connection-agrees-no-file', 'twin-connection-differs-no-file', 'twin-connection-agrees-no-file']);
+    await expect(run([...base, '--marked', 'tag'], BOTH)).rejects.toThrow('--marked needs --controls, --twin, --investigate-twin, --investigate-no-file or --more-twins');
+  });
+
   it('counts the copies in the pacing line', async () => {
     const plain = await run(['--min-gap-ms', '15000', '--votes', '16', '--investigations', '0', '--triage', '0'], BOTH);
     const wide = await run(['--min-gap-ms', '15000', '--votes', '16', '--investigations', '0', '--triage', '0', '--all-views'], BOTH);
@@ -3297,7 +3390,7 @@ describe('npm run profile', () => {
 
   it('refuses --marked with neither --controls nor --twin, before any call, and takes it with either', async () => {
     const base = ['--votes', '0', '--investigations', '0', '--triage', '0'];
-    await expect(run([...base, '--marked', 'tag'], BOTH)).rejects.toThrow('--marked needs --controls, --twin, --investigate-twin or --more-twins');
+    await expect(run([...base, '--marked', 'tag'], BOTH)).rejects.toThrow('--marked needs --controls, --twin, --investigate-twin, --investigate-no-file or --more-twins');
     await expect(run([...base, '--twin', '--marked'], BOTH)).rejects.toThrow(/--marked needs tag, note or tag,note/);
     await expect(run([...base, '--twin', '--marked', 'both'], BOTH)).rejects.toThrow(/--marked needs tag, note or tag,note/);
     expect((await run([...base, '--twin', '--marked', 'tag'], BOTH)).code).toBe(0);
