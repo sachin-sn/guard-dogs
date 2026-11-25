@@ -11,7 +11,9 @@ import {
   figures,
   inputsOf,
   makeups,
+  describeShape,
   measure,
+  shapeOf,
   mostlyFailed,
   plan,
   profileDog,
@@ -686,6 +688,73 @@ describe('pacing the calls', () => {
     }
     // No wait is longer than the gap: one model's waiting is not added to another's.
     expect(Math.max(...fake.sleeps)).toBeLessThanOrEqual(100);
+  });
+});
+
+describe('why a reply could not be read', () => {
+  it('describes the shape of a reply without keeping any of it', () => {
+    expect(shapeOf('{"decision":"approve"}')).toEqual({ chars: 22, fenced: false, textBefore: false, textAfter: false, inner: 'object' });
+    expect(shapeOf('I looked at it.\n{"decision":"reject","rationale":"x"}\nThat is my vote.')).toMatchObject({ textBefore: true, textAfter: true, inner: 'object' });
+    expect(shapeOf('```json\n{"decision":"reject"}\n```')).toMatchObject({ fenced: true, textBefore: false, textAfter: false, inner: 'object' });
+    expect(shapeOf('```json\nNote first.\n{"decision":"reject"}\n```')).toMatchObject({ fenced: true, textBefore: true, inner: 'object' });
+    expect(shapeOf('{"decision":"approve",')).toMatchObject({ inner: 'none', textBefore: false });
+    expect(shapeOf('{"decision": approve}')).toMatchObject({ inner: 'broken' });
+    expect(shapeOf('[{"a":1}]')).toMatchObject({ inner: 'object', textBefore: true, textAfter: true });
+    expect(shapeOf('{"a":1} {"b":2}')).toMatchObject({ inner: 'broken' });
+    expect(shapeOf('I will not vote on this.')).toEqual({ chars: 24, fenced: false, textBefore: true, textAfter: false, inner: 'none' });
+    expect(shapeOf('   ')).toMatchObject({ chars: 3, textBefore: false, inner: 'none' });
+    expect(describeShape(shapeOf('Sure. {"decision":"reject"}'))).toBe('a JSON object, with text before');
+    expect(describeShape(shapeOf('```\n{"decision":"reject"} ok\n```'))).toBe('a JSON object, with text after, in a code fence');
+    expect(describeShape(shapeOf('no'))).toBe('no braces, with text before');
+    expect(describeShape(shapeOf('{x}'))).toBe('braces that do not parse');
+  });
+
+  const chosen = plan(collected, { votes: 2, investigations: 1, triage: 1, runs: 1 });
+  const PROSE = 'SECRET-WORDS I checked the evidence. {"decision":"reject","rationale":"no"} Done.';
+
+  it('keeps the parser\'s reason and the shape for a finished reply that could not be read, in every kind of call, and none of the text', async () => {
+    const measured = await measure([participant('claude-large', () => PROSE), participant('claude-small', () => PROSE)], chosen);
+    const failed = [...measured.votes, ...measured.investigations, ...measured.triage];
+    expect(failed.length).toBeGreaterThan(0);
+    for (const record of failed) {
+      expect(record.outcome).toBe('failed');
+      expect(record.failure).toBe('output');
+      expect(record.unreadable).toEqual({ reason: expect.stringMatching(/^the reply was not a JSON object$/), chars: PROSE.length, fenced: false, textBefore: true, textAfter: true, inner: 'object' });
+    }
+    expect(JSON.stringify(measured)).not.toContain('SECRET-WORDS');
+    expect(JSON.stringify(measured)).not.toContain('I checked');
+  });
+
+  it('keeps the reason when the object is there but says the wrong thing', async () => {
+    const measured = await measure([participant('claude-large', () => '{"decision":"maybe"}')], plan(collected, { votes: 1, investigations: 0, triage: 0, runs: 1 }));
+    expect(measured.votes[0]?.unreadable).toEqual({ reason: 'the decision was not approve, reject or abstain', chars: 20, fenced: false, textBefore: false, textAfter: false, inner: 'object' });
+  });
+
+  it('keeps nothing for a call with no reply, or a reply the provider cut short', async () => {
+    const one = plan(collected, { votes: 1, investigations: 0, triage: 0, runs: 1 });
+    const network = await measure([participant('claude-large', () => { throw new ModelError('network', 'the connection failed'); })], one);
+    expect(network.votes[0]).toMatchObject({ failure: 'network' });
+    expect(network.votes[0]?.unreadable).toBeUndefined();
+    const cut = await measure([participant('claude-large', () => { throw new ModelError('output', 'the model did not finish its answer', undefined, 'finish max_tokens'); })], one);
+    expect(cut.votes[0]).toMatchObject({ failure: 'output finish max_tokens' });
+    expect(cut.votes[0]?.unreadable).toBeUndefined();
+    // A good answer after a bad one is not described by the bad one.
+    let n = 0;
+    const mixed = await measure([participant('claude-large', () => (n++ === 0 ? 'nope' : '{"decision":"abstain"}'))], plan(collected, { votes: 2, investigations: 0, triage: 0, runs: 1 }));
+    expect(mixed.votes.map((record) => record.unreadable === undefined)).toEqual([false, true]);
+  });
+
+  it('reports each model\'s reasons and shapes, with counts and lengths, and counts a triage request once', async () => {
+    const people = [participant('claude-large', () => PROSE), participant('claude-small', () => 'no braces here')];
+    const measured = await measure(people, chosen);
+    const text = renderMeasured(measured, chosen, people).join('\n');
+    expect(text).toContain("  why the replies could not be read (the parser's reason, and the shape of the reply; nothing it said):");
+    expect(text).toContain(`    claude-large   the reply was not a JSON object: a JSON object, with text before and text after x3 (${PROSE.length} to ${PROSE.length} characters)`);
+    expect(text).toContain('    claude-small   the reply was not a JSON object: no braces, with text before x1 (14 to 14 characters)');
+    expect(text).toContain('a JSON object with text around it: the model answered, and explained as well.');
+    expect(text).not.toContain('SECRET-WORDS');
+    const clean = await measure([participant('claude-large', () => 'no braces here')], plan(collected, { votes: 1, investigations: 0, triage: 0, runs: 1 }));
+    expect(renderMeasured(clean, plan(collected, { votes: 1, investigations: 0, triage: 0, runs: 1 }), [participant('claude-large', () => '')]).join('\n')).not.toContain('a JSON object with text around it');
   });
 });
 
