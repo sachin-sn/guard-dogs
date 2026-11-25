@@ -654,6 +654,66 @@ describe('the paragraph about attributes the client wrote, for the investigator'
   });
 });
 
+describe('telling the investigator what the list means, by itself', () => {
+  const tagged = (list: unknown, at = 0): Case['evidence'] =>
+    evidence(3).map((piece, i) => (i === at ? { ...piece, content: { ...(piece.content as Record<string, unknown>), client_ip: '203.0.113.50', clientWritten: list } } : piece)) as Case['evidence'];
+
+  it('adds the paragraph when the evidence it shows lists attributes the client wrote, and not otherwise', async () => {
+    const plain = make(none());
+    await plain.investigator.investigate(theCase());
+    expect(plain.seen[0]?.request.system).toBe(INVESTIGATOR_SYSTEM_PROMPT);
+    const told = make(none());
+    await told.investigator.investigate(theCase({ evidence: tagged(['client_ip']) }));
+    expect(told.seen[0]?.request.system).toBe(investigatorPromptWith(INVESTIGATOR_CLIENT_WRITTEN_NOTE));
+    // An empty list says the client wrote nothing, and needs no explaining.
+    const empty = make(none());
+    await empty.investigator.investigate(theCase({ evidence: tagged([]) }));
+    expect(empty.seen[0]?.request.system).toBe(INVESTIGATOR_SYSTEM_PROMPT);
+    // The words inside a log line are not a list.
+    const quoted = make(none());
+    await quoted.investigator.investigate(theCase({ evidence: [{ id: 'evt-1', content: { line: '"clientWritten":["client_ip"]' } }] }));
+    expect(quoted.seen[0]?.request.system).toBe(INVESTIGATOR_SYSTEM_PROMPT);
+  });
+
+  it('decides on what it shows: a list in a piece that did not fit is not mentioned', async () => {
+    const pieces = [...evidence(1, 900), { id: 'evt-late', content: { client_ip: '203.0.113.50', clientWritten: ['client_ip'] } }];
+    const cut = make(none(), {}, 'tiny');
+    await cut.investigator.investigate(theCase({ evidence: pieces }));
+    expect(cut.seen[0]?.request.user).not.toContain('evt-late');
+    expect(cut.seen[0]?.request.system).toBe(INVESTIGATOR_SYSTEM_PROMPT);
+    const whole = make(none());
+    await whole.investigator.investigate(theCase({ evidence: pieces }));
+    expect(whole.seen[0]?.request.system).toBe(investigatorPromptWith(INVESTIGATOR_CLIENT_WRITTEN_NOTE));
+  });
+
+  it('can be turned off, only by false, and puts the deployer\'s note after its own, once', async () => {
+    const off = make(none(), { explainClientWritten: false });
+    await off.investigator.investigate(theCase({ evidence: tagged(['client_ip']) }));
+    expect(off.seen[0]?.request.system).toBe(INVESTIGATOR_SYSTEM_PROMPT);
+    for (const value of [true, undefined]) {
+      const on = make(none(), value === undefined ? {} : { explainClientWritten: value });
+      await on.investigator.investigate(theCase({ evidence: tagged(['client_ip']) }));
+      expect(on.seen[0]?.request.system, String(value)).toBe(investigatorPromptWith(INVESTIGATOR_CLIENT_WRITTEN_NOTE));
+    }
+    const both = make(none(), { systemNote: 'Use care.' });
+    await both.investigator.investigate(theCase({ evidence: tagged(['client_ip']) }));
+    expect(both.seen[0]?.request.system).toBe(investigatorPromptWith(INVESTIGATOR_CLIENT_WRITTEN_NOTE, 'Use care.'));
+    const twice = make(none(), { systemNote: INVESTIGATOR_CLIENT_WRITTEN_NOTE });
+    await twice.investigator.investigate(theCase({ evidence: tagged(['client_ip']) }));
+    expect(twice.seen[0]?.request.system).toBe(investigatorPromptWith(INVESTIGATOR_CLIENT_WRITTEN_NOTE));
+    const offNoted = make(none(), { explainClientWritten: false, systemNote: 'Use care.' });
+    await offNoted.investigator.investigate(theCase({ evidence: tagged(['client_ip']) }));
+    expect(offNoted.seen[0]?.request.system).toBe(investigatorPromptWith('Use care.'));
+  });
+
+  it('decides afresh for each case', async () => {
+    const one = make(none());
+    await one.investigator.investigate(theCase({ evidence: tagged(['client_ip']) }));
+    await one.investigator.investigate(theCase());
+    expect(one.seen.map((entry) => entry.request.system)).toEqual([investigatorPromptWith(INVESTIGATOR_CLIENT_WRITTEN_NOTE), INVESTIGATOR_SYSTEM_PROMPT]);
+  });
+});
+
 describe('evidence that does not fit the model', () => {
   const userOf = (seen: { request: ModelRequest }[]) => (seen[0] as { request: ModelRequest }).request.user;
   const shownIds = (user: string): string[] => {

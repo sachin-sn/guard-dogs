@@ -40,6 +40,7 @@ import {
   type TriageDecision,
   type TriageItem,
   type TriageResult,
+  INVESTIGATOR_CLIENT_WRITTEN_NOTE,
 } from '../src/index.js';
 
 const T0 = new Date('2026-10-23T12:00:00.000Z');
@@ -1160,7 +1161,9 @@ describe('end to end', () => {
 
       expect(triageClient?.seen[0]?.user).toContain('"clientWritten":["client_ip"]');
       expect(investigatorClient.seen[0]?.user).toContain('"clientWritten":["client_ip"]');
-      expect(investigatorClient.seen[0]?.system).not.toContain('clientWritten');
+      // The investigator is told what the list means, because the evidence it was shown carries one; triage is not.
+      expect(investigatorClient.seen[0]?.system).toContain(INVESTIGATOR_CLIENT_WRITTEN_NOTE);
+      expect(triageClient?.seen[0]?.system).not.toContain('clientWritten');
     });
   });
 });

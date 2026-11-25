@@ -48,6 +48,7 @@
 import {
   CLIENT_WRITTEN_NOTE,
   INVESTIGATOR_CLIENT_WRITTEN_NOTE,
+  INVESTIGATOR_SYSTEM_PROMPT,
   investigatorPromptWith,
   ModelDog,
   ModelError,
@@ -495,7 +496,8 @@ async function twinInvestigationCases(withTwins: readonly Twin[]): Promise<TwinI
         id: `${twin.scenario.id}/look-${cases.length + 1}${marking === 'tag' ? '+tag' : ''}`,
         scenario: twin.scenario.id,
         category: twin.scenario.category,
-        request: call.request,
+        // The investigator now adds the paragraph by itself when the list is shown; the unmarked and tag arms are asked without it, so they mean what they did.
+        request: { system: INVESTIGATOR_SYSTEM_PROMPT, user: call.request.user },
         correct: run.correct.filter((containment) => containment.kind === 'contain.block-source'),
         offered: run.offered,
         forbidden: run.forbidden,

@@ -43,7 +43,7 @@ import type { JsonValue, ProposedAction } from '../core/types.js';
 import { MIN_LEVEL, type ActionKind } from '../gate/policy.js';
 import { sanitizeEvidence } from '../rules/sanitize.js';
 import type { ModelClient } from './client.js';
-import { newNonce, safeJson } from './prompt.js';
+import { newNonce, safeJson, showsClientWritten } from './prompt.js';
 import { ModelError } from './transport.js';
 import { readJsonReply } from './verdict.js';
 
@@ -90,10 +90,12 @@ export const INVESTIGATOR_SYSTEM_PROMPT = `${INVESTIGATOR_BODY}\n\n${INVESTIGATO
 
 /**
  * What an event's `clientWritten` list means, for an investigator that is to
- * choose a target. The evidence of a case carries the list (`incidents.ts`), and
- * until the live profile has measured what telling the investigator does
- * (docs/evaluation.md, "The investigator, told and not told"), nothing adds this
- * to the instructions by itself: a deployer can pass it as `systemNote`.
+ * choose a target. `Investigator` adds it to the instructions whenever the
+ * evidence it shows carries such a list, and only then. The tenth live run
+ * (docs/evaluation.md, "The tenth run") is why: told nothing, both models
+ * proposed a block on the address the client wrote in every call; with the
+ * paragraph neither did, and the block on an address the client did not forge
+ * was proposed as often as before. `explainClientWritten: false` turns it off.
  */
 export const INVESTIGATOR_CLIENT_WRITTEN_NOTE =
   'Some pieces of evidence list `clientWritten`: the names of the attributes in that event whose values the client of the request wrote or chose. Whoever is attacking the service may have set any of them to anything, including the address of someone else, so a value that only such an attribute supports says nothing about who is attacking. Propose a block of a source only if an attribute outside that list supports it; if the only support is in the list, choose another target or answer "none".';
@@ -193,8 +195,14 @@ export interface InvestigatorOptions {
   /** A fresh token for the block tags. Default: random. Tests pass a fixed one. */
   nonce?: () => string;
   clock?: () => Date;
-  /** One more paragraph of instructions, after the standard ones (see `investigatorPromptWith`). Default: none. */
+  /** One more paragraph of instructions, after the standard ones and after the automatic one (see `investigatorPromptWith`). Default: none. */
   systemNote?: string;
+  /**
+   * Tell the model what an event's `clientWritten` list means whenever the
+   * evidence it is shown carries one (`INVESTIGATOR_CLIENT_WRITTEN_NOTE`).
+   * Default: true. Only `false` turns it off, for a test that has to ask without it.
+   */
+  explainClientWritten?: boolean;
 }
 
 type Reply =
@@ -256,7 +264,8 @@ export class Investigator {
   private readonly log: Pick<AuditLog, 'append'> | undefined;
   private readonly nonce: () => string;
   private readonly clock: () => Date;
-  private readonly system: string;
+  private readonly systemNote: string | undefined;
+  private readonly explainClientWritten: boolean;
 
   constructor(options: InvestigatorOptions) {
     if (!ID_PATTERN.test(options.id)) {
@@ -287,7 +296,9 @@ export class Investigator {
     this.nonce = options.nonce ?? newNonce;
     this.clock = options.clock ?? (() => new Date());
     // Checked here, so a bad note is found before the first case and not on it.
-    this.system = options.systemNote === undefined ? INVESTIGATOR_SYSTEM_PROMPT : investigatorPromptWith(options.systemNote);
+    if (options.systemNote !== undefined) investigatorPromptWith(options.systemNote);
+    this.systemNote = options.systemNote;
+    this.explainClientWritten = options.explainClientWritten !== false;
   }
 
   /**
@@ -421,6 +432,13 @@ export class Investigator {
       'Reply with the JSON object only.',
     ].join('\n');
 
+    // What the model is shown decides whether it is told what the list means: a list that did not fit is not mentioned.
+    const notes: string[] = [];
+    if (this.explainClientWritten && showsClientWritten(view.json.evidenceBlock)) notes.push(INVESTIGATOR_CLIENT_WRITTEN_NOTE);
+    if (this.systemNote !== undefined) notes.push(this.systemNote);
+    const [first, ...rest] = notes;
+    const system = first === undefined ? INVESTIGATOR_SYSTEM_PROMPT : investigatorPromptWith(first, ...rest);
+
     let onAbort: (() => void) | undefined;
     const aborted = new Promise<never>((_resolve, reject) => {
       onAbort = () => reject(timedOut ? new Timeout() : new Error('stopped'));
@@ -429,7 +447,7 @@ export class Investigator {
     try {
       if (controller.signal.aborted) throw timedOut ? new Timeout() : new Error('stopped');
       // Raced, so a client that ignores the signal is not waited for.
-      return await Promise.race([this.client.complete({ system: this.system, user }, controller.signal), aborted]);
+      return await Promise.race([this.client.complete({ system, user }, controller.signal), aborted]);
     } catch (error) {
       if (controller.signal.aborted && timedOut) throw new Timeout();
       throw error;
